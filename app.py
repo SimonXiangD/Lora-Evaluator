@@ -498,7 +498,17 @@ def main():
         metrics = [m.strip() for m in st.session_state.metrics if m.strip()]
         
         num_seeds = len(st.session_state.seeds)
-        st.info(f"📊 Total generations: {len(prompt_pairs)} prompt pairs × {int((weight_max - weight_min) / weight_step) + 1} weights × {num_seeds} seeds × 2 (baseline + lora) = {len(prompt_pairs) * (int((weight_max - weight_min) / weight_step) + 1) * num_seeds * 2} images")
+        # Calculate actual number of non-zero weights
+        weights = []
+        current = weight_min
+        while current <= weight_max:
+            w = round(current, 2)
+            if w != 0:  # Backend skips 0 as baseline is separate
+                weights.append(w)
+            current += weight_step
+        num_weights = len(weights)
+        total_pairs = len(prompt_pairs) * num_weights * num_seeds
+        st.info(f"📊 Total pairs to evaluate: {len(prompt_pairs)} prompts × {num_weights} non-zero weights × {num_seeds} seeds = {total_pairs} pairs (each with baseline + lora images)")
         
         # Validation messages
         can_generate = True
@@ -666,28 +676,35 @@ def main():
                 # Main layout: images on left (70%), controls on right (30%)
                 col_images, col_controls = st.columns([7, 3])
                 
+                # Load images once at the beginning (outside columns for efficiency)
+                left_path = result['lora']['image_path'] if swap else result['baseline']['image_path']
+                right_path = result['baseline']['image_path'] if swap else result['lora']['image_path']
+                
+                # Cache images to avoid reloading on every interaction
+                @st.cache_data
+                def load_image(path):
+                    if os.path.exists(path):
+                        return Image.open(path)
+                    return None
+                
+                left_img = load_image(left_path)
+                right_img = load_image(right_path)
+                
                 with col_images:
                     # Blind evaluation - randomly swap left/right positions
                     # Don't show which is baseline or lora
                     img_col1, img_col2 = st.columns(2)
                     
-                    # Determine which image goes where based on swap flag
-                    left_path = result['lora']['image_path'] if swap else result['baseline']['image_path']
-                    right_path = result['baseline']['image_path'] if swap else result['lora']['image_path']
-                    left_is_lora = swap
-                    
                     with img_col1:
                         st.markdown("### 🔵 Image A")
-                        if os.path.exists(left_path):
-                            left_img = Image.open(left_path)
+                        if left_img:
                             st.image(left_img, use_container_width=True)
                         else:
                             st.error("Image not found")
                     
                     with img_col2:
                         st.markdown("### 🟢 Image B")
-                        if os.path.exists(right_path):
-                            right_img = Image.open(right_path)
+                        if right_img:
                             st.image(right_img, use_container_width=True)
                         else:
                             st.error("Image not found")
@@ -721,24 +738,27 @@ def main():
                         if st.button("🔵\nImage A", use_container_width=True, 
                                    type="primary" if st.session_state.temp_choice == 'A' else "secondary",
                                    key=f"btn_A_{current_idx}_{current_metric_idx}"):
-                            st.session_state.temp_choice = 'A'
-                            st.rerun()
+                            if st.session_state.temp_choice != 'A':
+                                st.session_state.temp_choice = 'A'
+                                st.rerun()
                     
                     with btn_col2:
                         if st.button("🟢\nImage B", use_container_width=True,
                                    type="primary" if st.session_state.temp_choice == 'B' else "secondary",
                                    key=f"btn_B_{current_idx}_{current_metric_idx}"):
-                            st.session_state.temp_choice = 'B'
-                            st.session_state.temp_stars = None
-                            st.rerun()
+                            if st.session_state.temp_choice != 'B':
+                                st.session_state.temp_choice = 'B'
+                                st.session_state.temp_stars = None
+                                st.rerun()
                     
                     with btn_col3:
                         if st.button("➖\nSame", use_container_width=True,
                                    type="primary" if st.session_state.temp_choice == 'same' else "secondary",
                                    key=f"btn_same_{current_idx}_{current_metric_idx}"):
-                            st.session_state.temp_choice = 'same'
-                            st.session_state.temp_stars = None
-                            st.rerun()
+                            if st.session_state.temp_choice != 'same':
+                                st.session_state.temp_choice = 'same'
+                                st.session_state.temp_stars = None
+                                st.rerun()
                     
                     st.divider()
                     
@@ -842,59 +862,84 @@ def main():
                 scored_df = scores_df[scores_df['choice'] != 'skip'].copy()
                 
                 if len(scored_df) > 0:
-                    # Calculate statistics by weight
-                    weight_stats = scored_df.groupby('weight').agg({
-                        'is_better': ['sum', 'count', 'mean']
+                    # Calculate statistics by metric and weight
+                    st.subheader("📊 Results by Metric")
+                    
+                    for metric in st.session_state.metrics_for_evaluation:
+                        metric_df = scored_df[scored_df['metric'] == metric].copy()
+                        if len(metric_df) > 0:
+                            st.write(f"**{metric}**")
+                            
+                            # Count lora_better results by weight
+                            weight_stats = metric_df.groupby('weight').agg({
+                                'lora_better': lambda x: x.sum(),  # Count True values
+                                'pair_index': 'count'  # Total count
+                            }).reset_index()
+                            weight_stats.columns = ['weight', 'lora_better_count', 'total_count']
+                            weight_stats['lora_better_rate'] = weight_stats['lora_better_count'] / weight_stats['total_count']
+                            
+                            # Calculate average star rating for "better" choices
+                            better_df = metric_df[metric_df['lora_better'] == True].copy()
+                            if len(better_df) > 0 and 'stars' in better_df.columns:
+                                star_stats = better_df.groupby('weight')['stars'].mean().reset_index()
+                                star_stats.columns = ['weight', 'avg_stars']
+                                weight_stats = weight_stats.merge(star_stats, on='weight', how='left')
+                            
+                            st.dataframe(weight_stats, use_container_width=True)
+                            
+                            # Chart for this metric
+                            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+                            
+                            # Success rate chart
+                            ax1.plot(weight_stats['weight'], weight_stats['lora_better_rate'], marker='o', linewidth=2, markersize=8, color='#1f77b4')
+                            ax1.set_xlabel('LoRA Weight', fontsize=11)
+                            ax1.set_ylabel('LoRA Better Rate', fontsize=11)
+                            ax1.set_title(f'{metric} - LoRA Better Rate by Weight', fontsize=12, fontweight='bold')
+                            ax1.grid(True, alpha=0.3)
+                            ax1.set_ylim(0, 1)
+                            
+                            # Star rating chart (if available)
+                            if 'avg_stars' in weight_stats.columns:
+                                star_data = weight_stats.dropna(subset=['avg_stars'])
+                                if len(star_data) > 0:
+                                    ax2.plot(star_data['weight'], star_data['avg_stars'], marker='*', linewidth=2, markersize=12, color='#ff7f0e')
+                                    ax2.set_xlabel('LoRA Weight', fontsize=11)
+                                    ax2.set_ylabel('Average Star Rating', fontsize=11)
+                                    ax2.set_title(f'{metric} - Avg Quality Rating', fontsize=12, fontweight='bold')
+                                    ax2.grid(True, alpha=0.3)
+                                    ax2.set_ylim(0, 5.5)
+                                else:
+                                    ax2.text(0.5, 0.5, 'No star ratings', ha='center', va='center', transform=ax2.transAxes)
+                            else:
+                                ax2.text(0.5, 0.5, 'No star ratings', ha='center', va='center', transform=ax2.transAxes)
+                            
+                            plt.tight_layout()
+                            st.pyplot(fig)
+                            plt.close()
+                            st.write("")
+                    
+                    # Overall summary across all metrics
+                    st.divider()
+                    st.subheader("📊 Overall Summary")
+                    overall_stats = scored_df.groupby('weight').agg({
+                        'lora_better': lambda x: x.sum(),
+                        'pair_index': 'count'
                     }).reset_index()
-                    weight_stats.columns = ['weight', 'yes_count', 'total_count', 'yes_rate']
+                    overall_stats.columns = ['weight', 'lora_better_count', 'total_count']
+                    overall_stats['lora_better_rate'] = overall_stats['lora_better_count'] / overall_stats['total_count']
                     
-                    # Calculate average star rating for "better" choices
-                    better_df = scored_df[scored_df['is_better'] == True].copy()
-                    if len(better_df) > 0 and 'stars' in better_df.columns:
-                        star_stats = better_df.groupby('weight')['stars'].mean().reset_index()
-                        star_stats.columns = ['weight', 'avg_stars']
-                        weight_stats = weight_stats.merge(star_stats, on='weight', how='left')
+                    st.dataframe(overall_stats, use_container_width=True)
                     
-                    # Display statistics
-                    st.subheader("📊 Results by Weight")
-                    st.dataframe(weight_stats, use_container_width=True)
+                    if len(overall_stats) > 0:
+                        best_weight = overall_stats.loc[overall_stats['lora_better_rate'].idxmax(), 'weight']
+                        best_rate = overall_stats.loc[overall_stats['lora_better_rate'].idxmax(), 'lora_better_rate']
+                        st.success(f"🏆 Best Weight (Overall): **{best_weight}** (LoRA Better Rate: {best_rate:.1%})")
                     
-                    # Dual chart: Success Rate and Average Stars
-                    st.subheader("📈 Performance by Weight")
-                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-                    
-                    # Success rate chart
-                    ax1.plot(weight_stats['weight'], weight_stats['yes_rate'], marker='o', linewidth=2, markersize=8, color='#1f77b4')
-                    ax1.set_xlabel('LoRA Weight', fontsize=12)
-                    ax1.set_ylabel('Success Rate', fontsize=12)
-                    ax1.set_title('Success Rate by Weight', fontsize=14, fontweight='bold')
-                    ax1.grid(True, alpha=0.3)
-                    ax1.set_ylim(0, 1)
-                    
-                    # Star rating chart (if available)
-                    if 'avg_stars' in weight_stats.columns:
-                        star_data = weight_stats.dropna(subset=['avg_stars'])
-                        if len(star_data) > 0:
-                            ax2.plot(star_data['weight'], star_data['avg_stars'], marker='*', linewidth=2, markersize=15, color='#ff7f0e')
-                            ax2.set_xlabel('LoRA Weight', fontsize=12)
-                            ax2.set_ylabel('Average Star Rating', fontsize=12)
-                            ax2.set_title('Average Quality Rating (for "Better" choices)', fontsize=14, fontweight='bold')
-                            ax2.grid(True, alpha=0.3)
-                            ax2.set_ylim(0, 5.5)
-                    
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                    
-                    # Best weight
-                    best_weight = weight_stats.loc[weight_stats['yes_rate'].idxmax(), 'weight']
-                    best_rate = weight_stats.loc[weight_stats['yes_rate'].idxmax(), 'yes_rate']
-                    st.success(f"🏆 Best Weight: **{best_weight}** (Success Rate: {best_rate:.1%})")
-                    
-                    # Show best images (pairs)
-                    st.subheader("🌟 Top Rated Pairs")
-                    best_images = scored_df[scored_df['is_better'] == True].copy()
+                    # Show best images (pairs where lora was better)
+                    st.subheader("🌟 Top Rated Pairs (LoRA Better)")
+                    best_images = scored_df[scored_df['lora_better'] == True].copy()
                     if 'stars' in best_images.columns:
-                        best_images = best_images.nlargest(6, 'stars')
+                        best_images = best_images.dropna(subset=['stars']).nlargest(6, 'stars')
                     else:
                         best_images = best_images.head(6)
                     
