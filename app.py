@@ -25,8 +25,114 @@ if 'evaluation_complete' not in st.session_state:
     st.session_state.evaluation_complete = False
 
 
+def inject_custom_css():
+    """Inject custom CSS for better button styling"""
+    st.markdown("""
+    <style>
+    /* Improve button styling with hover effects */
+    .stButton > button {
+        transition: all 0.3s ease;
+        border: 2px solid transparent;
+        font-weight: 600;
+        font-size: 16px;
+        padding: 12px 24px;
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        border-color: currentColor;
+    }
+    
+    .stButton > button:active {
+        transform: translateY(0px);
+    }
+    
+    /* Choice indicator */
+    .choice-indicator {
+        padding: 12px;
+        border-radius: 8px;
+        margin: 8px 0;
+        font-weight: 600;
+        text-align: center;
+        transition: all 0.3s ease;
+        animation: fadeIn 0.3s ease;
+    }
+    
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .choice-yes {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: 2px solid #667eea;
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+    }
+    
+    .choice-no {
+        background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        color: white;
+        border: 2px solid #f5576c;
+        box-shadow: 0 4px 12px rgba(245, 87, 108, 0.3);
+    }
+    
+    .choice-same {
+        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        color: white;
+        border: 2px solid #4facfe;
+        box-shadow: 0 4px 12px rgba(79, 172, 254, 0.3);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def render_star_rating(current_idx):
+    """Render interactive star rating"""
+    if st.session_state.temp_stars:
+        stars_display = "⭐" * st.session_state.temp_stars + "☆" * (5 - st.session_state.temp_stars)
+    else:
+        stars_display = "☆" * 5
+    
+    st.markdown(f"""
+    <div style="text-align: center; padding: 16px 0;">
+        <div style="font-size: 32px; letter-spacing: 4px; margin-bottom: 8px;">
+            {stars_display}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Star buttons
+    star_cols = st.columns(5)
+    for i, col in enumerate(star_cols):
+        star_num = i + 1
+        with col:
+            is_selected = st.session_state.temp_stars and star_num <= st.session_state.temp_stars
+            if st.button(
+                f"{'⭐' if is_selected else '☆'}", 
+                key=f"star_{star_num}_{current_idx}", 
+                use_container_width=True,
+                type="primary" if is_selected else "secondary"
+            ):
+                st.session_state.temp_stars = star_num
+                st.rerun()
+    
+    if st.session_state.temp_stars:
+        quality_map = {
+            1: "Slightly Better",
+            2: "Somewhat Better", 
+            3: "Moderately Better",
+            4: "Significantly Better",
+            5: "Dramatically Better"
+        }
+        st.markdown(f"<p style='text-align: center; color: #666; font-size: 14px; margin-top: 8px;'>{quality_map[st.session_state.temp_stars]}</p>", unsafe_allow_html=True)
+
+
 def main():
     st.set_page_config(page_title="LoRA Model Evaluator", layout="wide")
+    inject_custom_css()
+    
     st.title("🎨 Semi-automatic LoRA Model Evaluator")
     
     # Sidebar for configuration
@@ -62,30 +168,71 @@ def main():
         
         with col2:
             st.subheader("Prompts")
-            prompts_text = st.text_area(
-                "Positive Prompts (one per line)",
-                value="upperbody shot, 1girl, solo, chibi, long hair, happy, cute\n1boy, portrait, professional, detailed",
-                height=150,
-                help="Enter each prompt on a new line"
-            )
+            st.write("Enter prompt pairs (positive and negative). Each pair will be tested with all weights.")
             
-            negative_prompt = st.text_area(
-                "Negative Prompt (optional)",
-                value="(worst quality, low quality:1.4), (bad anatomy), text, error, missing fingers",
-                height=100
-            )
+            # Initialize prompt pairs in session state
+            if 'prompt_pairs' not in st.session_state:
+                st.session_state.prompt_pairs = [
+                    {
+                        'positive': 'upperbody shot, 1girl, solo, chibi, long hair, happy, cute',
+                        'negative': '(worst quality, low quality:1.4), (bad anatomy), text, error, missing fingers'
+                    },
+                    {
+                        'positive': '1boy, portrait, professional, detailed',
+                        'negative': '(worst quality, low quality:1.4), (bad anatomy), blurry'
+                    }
+                ]
+            
+            # Display existing prompt pairs
+            for idx, pair in enumerate(st.session_state.prompt_pairs):
+                with st.expander(f"Prompt Pair {idx + 1}", expanded=(idx == 0)):
+                    pair['positive'] = st.text_area(
+                        "Positive Prompt",
+                        value=pair['positive'],
+                        height=80,
+                        key=f"positive_{idx}"
+                    )
+                    pair['negative'] = st.text_area(
+                        "Negative Prompt",
+                        value=pair['negative'],
+                        height=60,
+                        key=f"negative_{idx}"
+                    )
+                    if len(st.session_state.prompt_pairs) > 1:
+                        if st.button(f"🗑️ Remove Pair {idx + 1}", key=f"remove_{idx}"):
+                            st.session_state.prompt_pairs.pop(idx)
+                            st.rerun()
+            
+            # Add new prompt pair button
+            col_add, col_clear = st.columns(2)
+            with col_add:
+                if st.button("➕ Add Prompt Pair"):
+                    st.session_state.prompt_pairs.append({
+                        'positive': '',
+                        'negative': '(worst quality, low quality:1.4)'
+                    })
+                    st.rerun()
+            with col_clear:
+                if st.button("🔄 Reset to Default"):
+                    st.session_state.prompt_pairs = [
+                        {
+                            'positive': 'upperbody shot, 1girl, solo, chibi, long hair, happy, cute',
+                            'negative': '(worst quality, low quality:1.4), (bad anatomy), text, error, missing fingers'
+                        }
+                    ]
+                    st.rerun()
         
-        # Parse prompts
-        prompts = [p.strip() for p in prompts_text.split('\n') if p.strip()]
+        # Parse prompts (filter out empty ones)
+        prompt_pairs = [pair for pair in st.session_state.prompt_pairs if pair['positive'].strip()]
         
-        st.info(f"📊 Total generations: {len(prompts)} prompts × {int((weight_max - weight_min) / weight_step) + 1} weights = {len(prompts) * (int((weight_max - weight_min) / weight_step) + 1)} images")
+        st.info(f"📊 Total generations: {len(prompt_pairs)} prompt pairs × {int((weight_max - weight_min) / weight_step) + 1} weights × 2 (baseline + lora) = {len(prompt_pairs) * (int((weight_max - weight_min) / weight_step) + 1) * 2} images")
         
         # Start Generation Button
         if st.button("🚀 Start Generation", type="primary", use_container_width=True):
             if not lora_filename:
                 st.error("Please enter a LoRA filename")
-            elif not prompts:
-                st.error("Please enter at least one prompt")
+            elif not prompt_pairs:
+                st.error("Please enter at least one prompt pair")
             else:
                 st.session_state.generation_complete = False
                 st.session_state.results = []
@@ -96,9 +243,8 @@ def main():
                 # Store parameters
                 st.session_state.lora_filename = lora_filename
                 st.session_state.weight_range = (weight_min, weight_max, weight_step)
-                st.session_state.prompts = prompts
+                st.session_state.prompt_pairs_for_generation = prompt_pairs
                 st.session_state.base_seed = base_seed
-                st.session_state.negative_prompt = negative_prompt if negative_prompt else None
                 
                 st.rerun()
     
@@ -123,9 +269,8 @@ def main():
                 results = runner.generate_batch(
                     lora_name=st.session_state.lora_filename,
                     weight_range=st.session_state.weight_range,
-                    prompts=st.session_state.prompts,
+                    prompt_pairs=st.session_state.prompt_pairs_for_generation,
                     base_seed=st.session_state.base_seed,
-                    negative_prompt=st.session_state.negative_prompt,
                     progress_callback=progress_callback
                 )
                 
@@ -215,12 +360,12 @@ def main():
                             st.error("LoRA image not found")
                     
                     # Display metadata below images
-                    st.write(f"**Prompt:** {result['prompt']}")
+                    st.write(f"**Positive Prompt:** {result['prompt']}")
+                    st.write(f"**Negative Prompt:** {result.get('negative_prompt', 'N/A')}")
                     st.write(f"**Seed:** {result['seed']}")
                 
                 with col_controls:
                     st.markdown("### 📊 Rate This Pair")
-                    st.write("")
                     
                     # Initialize temp rating state for this comparison
                     if 'temp_choice' not in st.session_state:
@@ -228,54 +373,56 @@ def main():
                     if 'temp_stars' not in st.session_state:
                         st.session_state.temp_stars = None
                     
-                    # Yes/No buttons (vertical)
-                    if st.button("👍 LoRA is Better", use_container_width=True, type="primary"):
-                        st.session_state.temp_choice = 'yes'
-                    
-                    if st.button("👎 LoRA is Worse", use_container_width=True):
-                        st.session_state.temp_choice = 'no'
-                        st.session_state.temp_stars = None  # Clear stars when choosing No
-                    
-                    if st.button("➖ About the Same", use_container_width=True):
-                        st.session_state.temp_choice = 'same'
-                        st.session_state.temp_stars = None  # Clear stars when choosing Same
+                    # Show current choice with visual indicator
+                    if st.session_state.temp_choice:
+                        choice_class = f"choice-{st.session_state.temp_choice}"
+                        choice_text = {
+                            'yes': '✅ LoRA is Better',
+                            'no': '❌ LoRA is Worse',
+                            'same': '➖ About the Same'
+                        }
+                        st.markdown(f'<div class="choice-indicator {choice_class}">{choice_text[st.session_state.temp_choice]}</div>', unsafe_allow_html=True)
                     
                     st.write("")
+                    
+                    # Yes/No/Same buttons (horizontal layout)
+                    btn_col1, btn_col2, btn_col3 = st.columns(3)
+                    
+                    with btn_col1:
+                        if st.button("👍\nBetter", use_container_width=True, 
+                                   type="primary" if st.session_state.temp_choice == 'yes' else "secondary",
+                                   key=f"btn_yes_{current_idx}"):
+                            st.session_state.temp_choice = 'yes'
+                            st.rerun()
+                    
+                    with btn_col2:
+                        if st.button("👎\nWorse", use_container_width=True,
+                                   type="primary" if st.session_state.temp_choice == 'no' else "secondary",
+                                   key=f"btn_no_{current_idx}"):
+                            st.session_state.temp_choice = 'no'
+                            st.session_state.temp_stars = None
+                            st.rerun()
+                    
+                    with btn_col3:
+                        if st.button("➖\nSame", use_container_width=True,
+                                   type="primary" if st.session_state.temp_choice == 'same' else "secondary",
+                                   key=f"btn_same_{current_idx}"):
+                            st.session_state.temp_choice = 'same'
+                            st.session_state.temp_stars = None
+                            st.rerun()
+                    
                     st.divider()
                     
                     # Show star rating if Yes is selected
                     if st.session_state.temp_choice == 'yes':
-                        st.write("**How much better?** (Optional)")
-                        
-                        # Create 5 star buttons in a row
-                        star_cols = st.columns(5)
-                        for i, col in enumerate(star_cols):
-                            star_num = i + 1
-                            with col:
-                                # Show filled or empty star based on selection
-                                if st.session_state.temp_stars and star_num <= st.session_state.temp_stars:
-                                    button_label = "⭐"
-                                    button_type = "primary"
-                                else:
-                                    button_label = "☆"
-                                    button_type = "secondary"
-                                
-                                if st.button(button_label, key=f"star_{star_num}_{current_idx}", use_container_width=True, type=button_type):
-                                    st.session_state.temp_stars = star_num
-                                    st.rerun()
-                        
-                        if st.session_state.temp_stars:
-                            quality_map = {1: "Slightly", 2: "Slightly", 3: "Moderately", 4: "Significantly", 5: "Dramatically"}
-                            st.caption(f"{'⭐' * st.session_state.temp_stars} - {quality_map[st.session_state.temp_stars]} better")
-                        else:
-                            st.caption("Click a star to rate (optional)")
+                        st.markdown("**How much better?** *(Optional)*")
+                        render_star_rating(current_idx)
                     
-                    st.write("")
                     st.divider()
                     
                     # Submit button
                     if st.session_state.temp_choice:
-                        if st.button("✅ Submit & Next", use_container_width=True, type="secondary"):
+                        if st.button("✅ Submit & Next", use_container_width=True, type="primary", key=f"submit_{current_idx}"):
                             # Save the score
                             score_entry = {
                                 'baseline_path': result['baseline']['image_path'],
@@ -300,10 +447,9 @@ def main():
                         st.info("👆 Please select an option above")
                     
                     st.write("")
-                    st.divider()
                     
                     # Skip button at bottom
-                    if st.button("⏭️ Skip This Pair", use_container_width=True):
+                    if st.button("⏭️ Skip This Pair", use_container_width=True, key=f"skip_{current_idx}"):
                         st.session_state.scores.append({
                             'baseline_path': result['baseline']['image_path'],
                             'lora_path': result['lora']['image_path'],
@@ -366,7 +512,7 @@ def main():
                     if 'avg_stars' in weight_stats.columns:
                         star_data = weight_stats.dropna(subset=['avg_stars'])
                         if len(star_data) > 0:
-                            ax2.plot(star_data['weight'], star_data['avg_stars'], marker='⭐', linewidth=2, markersize=12, color='#ff7f0e')
+                            ax2.plot(star_data['weight'], star_data['avg_stars'], marker='*', linewidth=2, markersize=15, color='#ff7f0e')
                             ax2.set_xlabel('LoRA Weight', fontsize=12)
                             ax2.set_ylabel('Average Star Rating', fontsize=12)
                             ax2.set_title('Average Quality Rating (for "Better" choices)', fontsize=14, fontweight='bold')

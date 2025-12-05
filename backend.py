@@ -117,7 +117,7 @@ class ComfyRunner:
         history = self.get_history(prompt_id)
         return history.get(prompt_id, {}).get('outputs', {})
     
-    def generate_single(self, lora_name, weight, prompt, seed, negative_prompt=None):
+    def generate_single(self, lora_name, weight, prompt, seed, negative_prompt=""):
         """
         Generate a single image with specified parameters.
         
@@ -126,7 +126,7 @@ class ComfyRunner:
             weight: LoRA weight (strength_model)
             prompt: Positive prompt text
             seed: Random seed for generation
-            negative_prompt: Negative prompt text (optional)
+            negative_prompt: Negative prompt text (default: empty string)
             
         Returns:
             Dictionary with image path and metadata, or None if failed
@@ -147,9 +147,8 @@ class ComfyRunner:
         # Modify CLIPTextEncode positive prompt (Node 6)
         workflow_instance["6"]["inputs"]["text"] = prompt
         
-        # Modify negative prompt if provided (Node 7)
-        if negative_prompt:
-            workflow_instance["7"]["inputs"]["text"] = negative_prompt
+        # Modify negative prompt (Node 7)
+        workflow_instance["7"]["inputs"]["text"] = negative_prompt
         
         # Queue prompt and track via WebSocket
         ws = websocket.WebSocket()
@@ -195,7 +194,7 @@ class ComfyRunner:
         finally:
             ws.close()
     
-    def generate_batch(self, lora_name, weight_range, prompts, base_seed=None, negative_prompt=None, progress_callback=None):
+    def generate_batch(self, lora_name, weight_range, prompt_pairs, base_seed=None, progress_callback=None):
         """
         Generate a batch of images for weight x prompt combinations.
         Creates paired images: baseline (weight=0) and lora (weight=X) for each prompt+seed.
@@ -203,9 +202,8 @@ class ComfyRunner:
         Args:
             lora_name: Name of the LoRA file
             weight_range: Tuple of (min, max, step) for weights
-            prompts: List of prompt strings
+            prompt_pairs: List of dicts with 'positive' and 'negative' keys
             base_seed: Base seed (will increment for each generation)
-            negative_prompt: Negative prompt text (optional)
             progress_callback: Function to call with progress updates (current, total)
             
         Returns:
@@ -225,7 +223,7 @@ class ComfyRunner:
             current += step
         
         # Total: baseline + lora for each weight x prompt combination
-        total_generations = len(weights) * len(prompts) * 2
+        total_generations = len(weights) * len(prompt_pairs) * 2
         results = []
         
         # Initialize CSV log
@@ -233,7 +231,7 @@ class ComfyRunner:
         csv_exists = os.path.exists(log_path)
         
         with open(log_path, 'a', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['timestamp', 'image_path', 'lora_name', 'weight', 'prompt', 'seed', 'is_baseline']
+            fieldnames = ['timestamp', 'image_path', 'lora_name', 'weight', 'prompt', 'negative_prompt', 'seed', 'is_baseline']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             if not csv_exists:
@@ -243,20 +241,23 @@ class ComfyRunner:
             seed = base_seed
             
             for weight in weights:
-                for prompt in prompts:
+                for pair in prompt_pairs:
+                    positive_prompt = pair['positive']
+                    negative_prompt = pair['negative']
+                    
                     # Generate baseline (weight=0) with same seed and prompt
                     current_generation += 1
                     if progress_callback:
                         progress_callback(current_generation, total_generations)
                     
-                    baseline_result = self.generate_single(lora_name, 0.0, prompt, seed, negative_prompt)
+                    baseline_result = self.generate_single(lora_name, 0.0, positive_prompt, seed, negative_prompt)
                     
                     # Generate LoRA image with specified weight
                     current_generation += 1
                     if progress_callback:
                         progress_callback(current_generation, total_generations)
                     
-                    lora_result = self.generate_single(lora_name, weight, prompt, seed, negative_prompt)
+                    lora_result = self.generate_single(lora_name, weight, positive_prompt, seed, negative_prompt)
                     
                     if baseline_result and lora_result:
                         # Create paired result
@@ -264,7 +265,8 @@ class ComfyRunner:
                             'baseline': baseline_result,
                             'lora': lora_result,
                             'weight': weight,
-                            'prompt': prompt,
+                            'prompt': positive_prompt,
+                            'negative_prompt': negative_prompt,
                             'seed': seed
                         }
                         results.append(paired_result)
@@ -272,10 +274,12 @@ class ComfyRunner:
                         # Log both images
                         baseline_log = baseline_result.copy()
                         baseline_log['is_baseline'] = True
+                        baseline_log['negative_prompt'] = negative_prompt
                         writer.writerow(baseline_log)
                         
                         lora_log = lora_result.copy()
                         lora_log['is_baseline'] = False
+                        lora_log['negative_prompt'] = negative_prompt
                         writer.writerow(lora_log)
                         
                         csvfile.flush()  # Ensure data is written immediately
