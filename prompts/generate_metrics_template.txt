@@ -1,0 +1,9 @@
+Generate 2-3 evaluation metrics for assessing LoRA model performance based on: "{description}"
+    
+Return a JSON array of metric names (short phrases, 2-4 words each).
+Metrics should be specific, measurable aspects of image quality.
+
+Example format:
+{
+  "metrics": ["Visual Quality", "Style Consistency", "Detail Level"]
+}

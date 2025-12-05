@@ -10,6 +10,23 @@ from backend import ComfyRunner
 import matplotlib.pyplot as plt
 from PIL import Image
 import time
+import json
+from google import genai
+import shutil
+import base64
+
+
+def decode_key(encoded_key):
+    """Simple decode function to prevent web scraping"""
+    try:
+        return base64.b64decode(encoded_key).decode('utf-8')
+    except:
+        return ""
+
+
+# Encoded default API key (Base64 encoded to prevent simple scraping)
+# To encode a new key: base64.b64encode(b"your_key_here").decode()
+DEFAULT_ENCODED_KEY = "QUl6YVN5QVFlWTg5MTRJQTNzUWpwM2xYSFVKYXFVNDdPSUg3UGRz"
 
 
 # Initialize session state
@@ -17,12 +34,122 @@ if 'generation_complete' not in st.session_state:
     st.session_state.generation_complete = False
 if 'results' not in st.session_state:
     st.session_state.results = []
+if 'shuffled_results' not in st.session_state:
+    st.session_state.shuffled_results = []
 if 'current_eval_index' not in st.session_state:
     st.session_state.current_eval_index = 0
+if 'current_metric_index' not in st.session_state:
+    st.session_state.current_metric_index = 0
 if 'scores' not in st.session_state:
     st.session_state.scores = []
 if 'evaluation_complete' not in st.session_state:
     st.session_state.evaluation_complete = False
+if 'generating' not in st.session_state:
+    st.session_state.generating = False
+if 'metrics' not in st.session_state:
+    st.session_state.metrics = []
+if 'prompt_pairs' not in st.session_state:
+    st.session_state.prompt_pairs = []
+if 'seeds' not in st.session_state:
+    import random
+    st.session_state.seeds = [random.randint(1, 1000000)]
+
+
+def call_llm(prompt, api_key, model="gemini-2.5-flash"):
+    """Call Gemini API to generate content"""
+    try:
+        # Initialize client with API key
+        client = genai.Client(api_key=api_key)
+        
+        full_prompt = f"""You are a helpful assistant that generates prompts and evaluation metrics for image generation tasks. Return only valid JSON.
+
+{prompt}"""
+        
+        response = client.models.generate_content(
+            model=model,
+            contents=full_prompt
+        )
+        return response.text
+    except Exception as e:
+        print(f"LLM Error: {str(e)}")
+        raise e
+
+
+def load_prompt_template(filename, default_content):
+    """Load prompt template from file or create with default content"""
+    if os.path.exists(filename):
+        with open(filename, 'r', encoding='utf-8') as f:
+            return f.read()
+    else:
+        # Create default file
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(default_content)
+        return default_content
+
+
+def generate_prompts_with_llm(description, api_key, model="gemini-2.5-flash"):
+    """Generate prompt pairs using LLM"""
+    default_prompt = """Generate 2-3 image generation prompt pairs based on this description: "{description}"
+    
+Return a JSON array of objects, each with 'positive' and 'negative' keys.
+Positive prompts should be detailed and descriptive.
+Negative prompts should list common artifacts to avoid.
+
+Example format:
+{{
+  "prompts": [
+    {{
+      "positive": "detailed prompt here",
+      "negative": "bad quality, artifacts"
+    }}
+  ]
+}}"""
+    
+    prompt_template = load_prompt_template('prompts/generate_prompts_template.txt', default_prompt)
+    prompt = prompt_template.replace('{description}', description)
+    
+    try:
+        result = call_llm(prompt, api_key, model)
+        # Try to parse JSON from response
+        if '```json' in result:
+            result = result.split('```json')[1].split('```')[0]
+        elif '```' in result:
+            result = result.split('```')[1].split('```')[0]
+        
+        data = json.loads(result.strip())
+        return data.get('prompts', [])
+    except Exception as e:
+        print(f"Prompts generation error: {str(e)}")
+        return None
+
+
+def generate_metrics_with_llm(description, api_key, model="gemini-2.5-flash"):
+    """Generate evaluation metrics using LLM"""
+    default_prompt = """Generate 2-3 evaluation metrics for assessing LoRA model performance based on: "{description}"
+    
+Return a JSON array of metric names (short phrases, 2-4 words each).
+Metrics should be specific, measurable aspects of image quality.
+
+Example format:
+{{
+  "metrics": ["Visual Quality", "Style Consistency", "Detail Level"]
+}}"""
+    
+    prompt_template = load_prompt_template('prompts/generate_metrics_template.txt', default_prompt)
+    prompt = prompt_template.replace('{description}', description)
+    
+    try:
+        result = call_llm(prompt, api_key, model)
+        if '```json' in result:
+            result = result.split('```json')[1].split('```')[0]
+        elif '```' in result:
+            result = result.split('```')[1].split('```')[0]
+        
+        data = json.loads(result.strip())
+        return data.get('metrics', [])
+    except Exception as e:
+        print(f"Metrics generation error: {str(e)}")
+        return None
 
 
 def inject_custom_css():
@@ -149,39 +276,166 @@ def main():
     with tab1:
         st.header("Step 1: Setup Parameters")
         
+        # API Key configuration - use default encoded key
+        api_key = os.environ.get("GEMINI_API_KEY", decode_key(DEFAULT_ENCODED_KEY))
+        llm_model = "gemini-2.5-flash"  # Default model
+        
         col1, col2 = st.columns(2)
         
         with col1:
             st.subheader("LoRA Configuration")
-            lora_filename = st.text_input(
-                "LoRA Filename",
-                value="blindbox_v1_mix.safetensors",
-                help="Enter the LoRA filename (e.g., my_lora.safetensors)"
+            
+            # ComfyUI LoRA path configuration
+            with st.expander("⚙️ ComfyUI Path Settings", expanded=False):
+                comfyui_lora_path = st.text_input(
+                    "ComfyUI LoRA Folder Path",
+                    value=os.environ.get("COMFYUI_LORA_PATH", r"D:\ComfyUI\models\loras"),
+                    help="Path to your ComfyUI's models/loras folder."
+                )
+                if comfyui_lora_path and not os.path.exists(comfyui_lora_path):
+                    st.warning(f"⚠️ Path does not exist: {comfyui_lora_path}")
+            
+            # Get existing LoRA files from directory
+            lora_dir = comfyui_lora_path if comfyui_lora_path and os.path.exists(comfyui_lora_path) else "./loras"
+            os.makedirs(lora_dir, exist_ok=True)
+            
+            existing_loras = []
+            if os.path.exists(lora_dir):
+                existing_loras = [f for f in os.listdir(lora_dir) 
+                                if f.endswith(('.safetensors', '.pt', '.ckpt'))]
+            
+            # LoRA file upload
+            uploaded_lora = st.file_uploader(
+                "Upload LoRA File",
+                type=["safetensors", "pt", "ckpt"],
+                help="Upload your LoRA model file (.safetensors, .pt, or .ckpt)"
             )
             
-            st.subheader("Weight Range")
-            weight_min = st.number_input("Minimum Weight", value=-1.0, step=0.1)
-            weight_max = st.number_input("Maximum Weight", value=1.0, step=0.1)
-            weight_step = st.number_input("Weight Step", value=0.2, step=0.1, min_value=0.1)
+            # Save uploaded file and get filename
+            lora_filename = None
+            if uploaded_lora is not None:
+                lora_path = os.path.join(lora_dir, uploaded_lora.name)
+                lora_filename = uploaded_lora.name
+                
+                # Check if file already exists
+                if os.path.exists(lora_path):
+                    st.info(f"ℹ️ File already exists: {lora_filename}")
+                    st.caption(f"📁 Using existing file at: {lora_path}")
+                else:
+                    # Save the file
+                    with open(lora_path, "wb") as f:
+                        f.write(uploaded_lora.getbuffer())
+                    st.success(f"✅ Uploaded: {lora_filename}")
+                    st.caption(f"📁 Saved to: {lora_path}")
+                    # Refresh the list
+                    existing_loras.append(uploaded_lora.name)
+            else:
+                # Select from existing files
+                if existing_loras:
+                    lora_filename = st.selectbox(
+                        "Or select existing LoRA file",
+                        options=[""] + existing_loras,
+                        format_func=lambda x: "Select a file..." if x == "" else x,
+                        help="Choose from LoRA files already in the folder"
+                    )
+                    if lora_filename == "":
+                        lora_filename = None
+                else:
+                    st.info(f"📁 No LoRA files found in: {lora_dir}")
+                    lora_filename = st.text_input(
+                        "Or enter LoRA filename manually",
+                        placeholder="e.g., my_lora.safetensors",
+                        help="Enter the filename if it exists elsewhere"
+                    )
             
-            base_seed = st.number_input("Base Seed", value=int(time.time()), step=1)
+            st.subheader("Weight Range")
+            weight_min = st.number_input("Minimum Weight", value=0.0, step=0.1)
+            weight_max = st.number_input("Maximum Weight", value=1.0, step=0.1)
+            weight_step = st.number_input("Weight Step", value=0.5, step=0.1, min_value=0.1)
+            
+            st.divider()
+            st.subheader("Seeds")
+            st.write("**Seeds** (for reproducible generation)")
+            for i, seed in enumerate(st.session_state.seeds):
+                col_seed, col_del = st.columns([4, 1])
+                with col_seed:
+                    new_seed = st.number_input(
+                        f"Seed {i+1}",
+                        min_value=1,
+                        max_value=1000000,
+                        value=seed,
+                        key=f"seed_{i}"
+                    )
+                    if new_seed != seed:
+                        st.session_state.seeds[i] = new_seed
+                with col_del:
+                    st.write("")
+                    st.write("")
+                    if len(st.session_state.seeds) > 1:
+                        if st.button("❌", key=f"del_seed_{i}"):
+                            st.session_state.seeds.pop(i)
+                            st.rerun()
+            
+            if st.button("➕ Add Seed"):
+                import random
+                st.session_state.seeds.append(random.randint(1, 1000000))
+                st.rerun()
         
         with col2:
+            st.subheader("Evaluation Metrics")
+            st.write("Define 1-3 metrics for evaluating image quality (max 3).")
+            
+            # Display metrics
+            for idx, metric in enumerate(st.session_state.metrics):
+                col_metric, col_remove = st.columns([4, 1])
+                with col_metric:
+                    st.session_state.metrics[idx] = st.text_input(
+                        f"Metric {idx + 1}",
+                        value=metric,
+                        key=f"metric_{idx}",
+                        label_visibility="collapsed"
+                    )
+                with col_remove:
+                    if len(st.session_state.metrics) > 1:
+                        if st.button("🗑️", key=f"remove_metric_{idx}"):
+                            st.session_state.metrics.pop(idx)
+                            st.rerun()
+            
+            # Add/Reset metrics buttons
+            col_add_m, col_clear_m = st.columns(2)
+            with col_add_m:
+                if st.button("➕ Add Metric", disabled=len(st.session_state.metrics) >= 3):
+                    if len(st.session_state.metrics) < 3:
+                        st.session_state.metrics.append('')
+                        st.rerun()
+            with col_clear_m:
+                if st.button("🔄 Clear All Metrics"):
+                    st.session_state.metrics = []
+                    st.rerun()
+            
+            # LLM generation for metrics
+            metric_description = st.text_input(
+                "Or describe what aspects to evaluate",
+                placeholder="e.g., focus on facial details and color accuracy",
+                key="metric_desc"
+            )
+            if st.button("✨ Generate Metrics with AI"):
+                if metric_description:
+                    with st.spinner("Generating metrics..."):
+                        generated = generate_metrics_with_llm(metric_description, api_key, llm_model)
+                        if generated:
+                            # 追加模式：将新生成的metrics添加到现有列表
+                            st.session_state.metrics.extend(generated)
+                            st.success(f"已追加 {len(generated)} 个评价指标！当前共 {len(st.session_state.metrics)} 个指标")
+                            st.rerun()
+                        else:
+                            st.error("生成失败，请检查网络连接或稍后重试。")
+                else:
+                    st.warning("Please enter a description first.")
+            
+            st.divider()
             st.subheader("Prompts")
             st.write("Enter prompt pairs (positive and negative). Each pair will be tested with all weights.")
-            
-            # Initialize prompt pairs in session state
-            if 'prompt_pairs' not in st.session_state:
-                st.session_state.prompt_pairs = [
-                    {
-                        'positive': 'upperbody shot, 1girl, solo, chibi, long hair, happy, cute',
-                        'negative': '(worst quality, low quality:1.4), (bad anatomy), text, error, missing fingers'
-                    },
-                    {
-                        'positive': '1boy, portrait, professional, detailed',
-                        'negative': '(worst quality, low quality:1.4), (bad anatomy), blurry'
-                    }
-                ]
             
             # Display existing prompt pairs
             for idx, pair in enumerate(st.session_state.prompt_pairs):
@@ -213,40 +467,83 @@ def main():
                     })
                     st.rerun()
             with col_clear:
-                if st.button("🔄 Reset to Default"):
-                    st.session_state.prompt_pairs = [
-                        {
-                            'positive': 'upperbody shot, 1girl, solo, chibi, long hair, happy, cute',
-                            'negative': '(worst quality, low quality:1.4), (bad anatomy), text, error, missing fingers'
-                        }
-                    ]
+                if st.button("🗑️ Clear All"):
+                    st.session_state.prompt_pairs = []
                     st.rerun()
+            
+            # LLM generation for prompts
+            st.divider()
+            st.write("**🤖 AI Generation**")
+            prompt_description = st.text_input(
+                "Describe what you want to generate",
+                placeholder="e.g., anime characters in various poses and styles",
+                key="prompt_desc"
+            )
+            if st.button("✨ Generate Prompts with AI"):
+                if prompt_description:
+                    with st.spinner("Generating prompts..."):
+                        generated = generate_prompts_with_llm(prompt_description, api_key, llm_model)
+                        if generated:
+                            # 追加模式：将新生成的prompt pairs添加到现有列表
+                            st.session_state.prompt_pairs.extend(generated)
+                            st.success(f"已追加 {len(generated)} 组提示词对！当前共 {len(st.session_state.prompt_pairs)} 组")
+                            st.rerun()
+                        else:
+                            st.error("生成失败，请检查网络连接或稍后重试。")
+                else:
+                    st.warning("Please enter a description first.")
         
         # Parse prompts (filter out empty ones)
         prompt_pairs = [pair for pair in st.session_state.prompt_pairs if pair['positive'].strip()]
+        metrics = [m.strip() for m in st.session_state.metrics if m.strip()]
         
-        st.info(f"📊 Total generations: {len(prompt_pairs)} prompt pairs × {int((weight_max - weight_min) / weight_step) + 1} weights × 2 (baseline + lora) = {len(prompt_pairs) * (int((weight_max - weight_min) / weight_step) + 1) * 2} images")
+        num_seeds = len(st.session_state.seeds)
+        st.info(f"📊 Total generations: {len(prompt_pairs)} prompt pairs × {int((weight_max - weight_min) / weight_step) + 1} weights × {num_seeds} seeds × 2 (baseline + lora) = {len(prompt_pairs) * (int((weight_max - weight_min) / weight_step) + 1) * num_seeds * 2} images")
+        
+        # Validation messages
+        can_generate = True
+        validation_messages = []
+        
+        if not lora_filename:
+            validation_messages.append("❌ Please enter a LoRA filename")
+            can_generate = False
+        if not prompt_pairs:
+            validation_messages.append("❌ Please enter at least one prompt pair")
+            can_generate = False
+        if not metrics:
+            validation_messages.append("❌ Please define at least one metric")
+            can_generate = False
+        if len(metrics) > 3:
+            validation_messages.append(f"❌ Maximum 3 metrics allowed (current: {len(metrics)}). Please remove {len(metrics) - 3} metric(s)")
+            can_generate = False
+        
+        if validation_messages:
+            for msg in validation_messages:
+                st.warning(msg)
         
         # Start Generation Button
-        if st.button("🚀 Start Generation", type="primary", use_container_width=True):
-            if not lora_filename:
-                st.error("Please enter a LoRA filename")
-            elif not prompt_pairs:
-                st.error("Please enter at least one prompt pair")
-            else:
-                st.session_state.generation_complete = False
-                st.session_state.results = []
-                st.session_state.current_eval_index = 0
-                st.session_state.scores = []
-                st.session_state.evaluation_complete = False
-                
-                # Store parameters
-                st.session_state.lora_filename = lora_filename
-                st.session_state.weight_range = (weight_min, weight_max, weight_step)
-                st.session_state.prompt_pairs_for_generation = prompt_pairs
-                st.session_state.base_seed = base_seed
-                
-                st.rerun()
+        if st.session_state.generating:
+            st.info("🎬 Generation in progress... Please wait or check the Generation tab.")
+        
+        button_disabled = not can_generate or st.session_state.generating
+        button_label = "⏳ Generating..." if st.session_state.generating else "🚀 Start Generation"
+        
+        if st.button(button_label, type="primary", use_container_width=True, disabled=button_disabled):
+            st.session_state.generation_complete = False
+            st.session_state.results = []
+            st.session_state.current_eval_index = 0
+            st.session_state.scores = []
+            st.session_state.evaluation_complete = False
+            st.session_state.generating = True
+            
+            # Store parameters
+            st.session_state.lora_filename = lora_filename
+            st.session_state.weight_range = (weight_min, weight_max, weight_step)
+            st.session_state.prompt_pairs_for_generation = prompt_pairs
+            st.session_state.metrics_for_evaluation = metrics
+            st.session_state.seeds_for_generation = st.session_state.seeds
+            
+            st.rerun()
     
     # ===== TAB 2: GENERATION =====
     with tab2:
@@ -264,24 +561,47 @@ def main():
                 progress_bar.progress(progress)
                 status_text.text(f"Generating image {current} of {total}...")
             
-            # Run generation
+            # Run generation for all seeds
             try:
-                results = runner.generate_batch(
-                    lora_name=st.session_state.lora_filename,
-                    weight_range=st.session_state.weight_range,
-                    prompt_pairs=st.session_state.prompt_pairs_for_generation,
-                    base_seed=st.session_state.base_seed,
-                    progress_callback=progress_callback
-                )
+                all_results = []
+                for seed in st.session_state.seeds_for_generation:
+                    results = runner.generate_batch(
+                        lora_name=st.session_state.lora_filename,
+                        weight_range=st.session_state.weight_range,
+                        prompt_pairs=st.session_state.prompt_pairs_for_generation,
+                        base_seed=seed,
+                        progress_callback=progress_callback
+                    )
+                    all_results.extend(results)
                 
-                st.session_state.results = results
+                st.session_state.results = all_results
+                
+                # Shuffle results for blind evaluation and prepare with random left/right order
+                import random
+                shuffled = all_results.copy()
+                random.shuffle(shuffled)
+                
+                # For each result, randomly decide left/right order
+                st.session_state.shuffled_results = []
+                for result in shuffled:
+                    swap = random.choice([True, False])
+                    st.session_state.shuffled_results.append({
+                        'result': result,
+                        'swap': swap  # If True, swap baseline and lora positions
+                    })
+                
                 st.session_state.generation_complete = True
-                st.success(f"✅ Generation complete! {len(results)} images created.")
+                st.session_state.generating = False
+                st.session_state.current_eval_index = 0
+                st.session_state.current_metric_index = 0
+                st.session_state.scores = []
+                st.success(f"✅ Generation complete! {len(all_results)} pairs created.")
                 st.balloons()
                 
             except Exception as e:
                 st.error(f"❌ Error during generation: {str(e)}")
                 st.exception(e)
+                st.session_state.generating = False
         
         elif st.session_state.generation_complete:
             st.success(f"✅ Generation complete! {len(st.session_state.results)} pairs created.")
@@ -308,17 +628,23 @@ def main():
     
     # ===== TAB 3: EVALUATION =====
     with tab3:
-        st.header("Step 3: Image Evaluation")
+        st.header("Step 3: Blind Image Evaluation")
         
         if not st.session_state.generation_complete:
             st.info("⏳ Please complete generation first")
         elif st.session_state.evaluation_complete:
             st.success("✅ Evaluation complete! Check the Report tab for results.")
         else:
-            results = st.session_state.results
+            shuffled_results = st.session_state.shuffled_results
+            metrics = st.session_state.metrics_for_evaluation
             current_idx = st.session_state.current_eval_index
+            current_metric_idx = st.session_state.current_metric_index
             
-            if current_idx >= len(results):
+            # Calculate total evaluations needed (pairs × metrics)
+            total_evals = len(shuffled_results) * len(metrics)
+            current_eval_num = current_idx * len(metrics) + current_metric_idx + 1
+            
+            if current_idx >= len(shuffled_results):
                 st.session_state.evaluation_complete = True
                 
                 # Save scores to CSV
@@ -329,43 +655,46 @@ def main():
                 st.success("✅ All evaluations complete!")
                 st.rerun()
             else:
-                result = results[current_idx]
+                shuffled_item = shuffled_results[current_idx]
+                result = shuffled_item['result']
+                swap = shuffled_item['swap']
+                current_metric = metrics[current_metric_idx]
                 
-                st.progress((current_idx + 1) / len(results))
-                st.write(f"Pair {current_idx + 1} of {len(results)}")
+                st.progress(current_eval_num / total_evals)
+                st.write(f"**Evaluation {current_eval_num} of {total_evals}** | Pair {current_idx + 1}/{len(shuffled_results)} | Metric: **{current_metric}**")
                 
                 # Main layout: images on left (70%), controls on right (30%)
                 col_images, col_controls = st.columns([7, 3])
                 
                 with col_images:
-                    # Side-by-side image comparison
+                    # Blind evaluation - randomly swap left/right positions
+                    # Don't show which is baseline or lora
                     img_col1, img_col2 = st.columns(2)
                     
+                    # Determine which image goes where based on swap flag
+                    left_path = result['lora']['image_path'] if swap else result['baseline']['image_path']
+                    right_path = result['baseline']['image_path'] if swap else result['lora']['image_path']
+                    left_is_lora = swap
+                    
                     with img_col1:
-                        st.markdown("### 🔵 Without LoRA (Weight = 0)")
-                        baseline_path = result['baseline']['image_path']
-                        if os.path.exists(baseline_path):
-                            baseline_img = Image.open(baseline_path)
-                            st.image(baseline_img, use_container_width=True)
+                        st.markdown("### 🔵 Image A")
+                        if os.path.exists(left_path):
+                            left_img = Image.open(left_path)
+                            st.image(left_img, use_container_width=True)
                         else:
-                            st.error("Baseline image not found")
+                            st.error("Image not found")
                     
                     with img_col2:
-                        st.markdown(f"### 🟢 With LoRA (Weight = {result['weight']})")
-                        lora_path = result['lora']['image_path']
-                        if os.path.exists(lora_path):
-                            lora_img = Image.open(lora_path)
-                            st.image(lora_img, use_container_width=True)
+                        st.markdown("### 🟢 Image B")
+                        if os.path.exists(right_path):
+                            right_img = Image.open(right_path)
+                            st.image(right_img, use_container_width=True)
                         else:
-                            st.error("LoRA image not found")
-                    
-                    # Display metadata below images
-                    st.write(f"**Positive Prompt:** {result['prompt']}")
-                    st.write(f"**Negative Prompt:** {result.get('negative_prompt', 'N/A')}")
-                    st.write(f"**Seed:** {result['seed']}")
+                            st.error("Image not found")
                 
                 with col_controls:
-                    st.markdown("### 📊 Rate This Pair")
+                    st.markdown(f"### 📊 {current_metric}")
+                    st.write("Which image is better for this metric?")
                     
                     # Initialize temp rating state for this comparison
                     if 'temp_choice' not in st.session_state:
@@ -377,62 +706,76 @@ def main():
                     if st.session_state.temp_choice:
                         choice_class = f"choice-{st.session_state.temp_choice}"
                         choice_text = {
-                            'yes': '✅ LoRA is Better',
-                            'no': '❌ LoRA is Worse',
+                            'A': '✅ Image A is Better',
+                            'B': '✅ Image B is Better',
                             'same': '➖ About the Same'
                         }
                         st.markdown(f'<div class="choice-indicator {choice_class}">{choice_text[st.session_state.temp_choice]}</div>', unsafe_allow_html=True)
                     
                     st.write("")
                     
-                    # Yes/No/Same buttons (horizontal layout)
+                    # A/B/Same buttons (horizontal layout)
                     btn_col1, btn_col2, btn_col3 = st.columns(3)
                     
                     with btn_col1:
-                        if st.button("👍\nBetter", use_container_width=True, 
-                                   type="primary" if st.session_state.temp_choice == 'yes' else "secondary",
-                                   key=f"btn_yes_{current_idx}"):
-                            st.session_state.temp_choice = 'yes'
+                        if st.button("🔵\nImage A", use_container_width=True, 
+                                   type="primary" if st.session_state.temp_choice == 'A' else "secondary",
+                                   key=f"btn_A_{current_idx}_{current_metric_idx}"):
+                            st.session_state.temp_choice = 'A'
                             st.rerun()
                     
                     with btn_col2:
-                        if st.button("👎\nWorse", use_container_width=True,
-                                   type="primary" if st.session_state.temp_choice == 'no' else "secondary",
-                                   key=f"btn_no_{current_idx}"):
-                            st.session_state.temp_choice = 'no'
+                        if st.button("🟢\nImage B", use_container_width=True,
+                                   type="primary" if st.session_state.temp_choice == 'B' else "secondary",
+                                   key=f"btn_B_{current_idx}_{current_metric_idx}"):
+                            st.session_state.temp_choice = 'B'
                             st.session_state.temp_stars = None
                             st.rerun()
                     
                     with btn_col3:
                         if st.button("➖\nSame", use_container_width=True,
                                    type="primary" if st.session_state.temp_choice == 'same' else "secondary",
-                                   key=f"btn_same_{current_idx}"):
+                                   key=f"btn_same_{current_idx}_{current_metric_idx}"):
                             st.session_state.temp_choice = 'same'
                             st.session_state.temp_stars = None
                             st.rerun()
                     
                     st.divider()
                     
-                    # Show star rating if Yes is selected
-                    if st.session_state.temp_choice == 'yes':
+                    # Show star rating if A or B is selected (how much better)
+                    if st.session_state.temp_choice in ['A', 'B']:
                         st.markdown("**How much better?** *(Optional)*")
-                        render_star_rating(current_idx)
+                        render_star_rating(f"{current_idx}_{current_metric_idx}")
                     
                     st.divider()
                     
                     # Submit button
                     if st.session_state.temp_choice:
-                        if st.button("✅ Submit & Next", use_container_width=True, type="primary", key=f"submit_{current_idx}"):
+                        if st.button("✅ Submit & Next", use_container_width=True, type="primary", key=f"submit_{current_idx}_{current_metric_idx}"):
+                            # Determine which was lora based on choice and swap
+                            lora_better = None
+                            if st.session_state.temp_choice != 'same':
+                                # If chose A and swap is False (A is baseline), then lora is not better
+                                # If chose A and swap is True (A is lora), then lora is better
+                                # If chose B and swap is False (B is lora), then lora is better
+                                # If chose B and swap is True (B is baseline), then lora is not better
+                                if st.session_state.temp_choice == 'A':
+                                    lora_better = swap  # True if A is lora
+                                else:  # chose B
+                                    lora_better = not swap  # True if B is lora
+                            
                             # Save the score
                             score_entry = {
+                                'pair_index': current_idx,
+                                'metric': current_metric,
                                 'baseline_path': result['baseline']['image_path'],
                                 'lora_path': result['lora']['image_path'],
                                 'weight': result['weight'],
                                 'prompt': result['prompt'],
                                 'seed': result['seed'],
                                 'choice': st.session_state.temp_choice,
-                                'stars': st.session_state.temp_stars if st.session_state.temp_choice == 'yes' else None,
-                                'is_better': True if st.session_state.temp_choice == 'yes' else False if st.session_state.temp_choice == 'no' else None
+                                'stars': st.session_state.temp_stars if st.session_state.temp_choice in ['A', 'B'] else None,
+                                'lora_better': lora_better
                             }
                             st.session_state.scores.append(score_entry)
                             
@@ -440,30 +783,50 @@ def main():
                             st.session_state.temp_choice = None
                             st.session_state.temp_stars = None
                             
-                            # Move to next
-                            st.session_state.current_eval_index += 1
+                            # Move to next metric or next pair
+                            if current_metric_idx + 1 < len(metrics):
+                                st.session_state.current_metric_index += 1
+                            else:
+                                st.session_state.current_metric_index = 0
+                                st.session_state.current_eval_index += 1
                             st.rerun()
                     else:
                         st.info("👆 Please select an option above")
                     
                     st.write("")
                     
-                    # Skip button at bottom
-                    if st.button("⏭️ Skip This Pair", use_container_width=True, key=f"skip_{current_idx}"):
-                        st.session_state.scores.append({
-                            'baseline_path': result['baseline']['image_path'],
-                            'lora_path': result['lora']['image_path'],
-                            'weight': result['weight'],
-                            'prompt': result['prompt'],
-                            'seed': result['seed'],
-                            'choice': 'skip',
-                            'stars': None,
-                            'is_better': None
-                        })
-                        st.session_state.temp_choice = None
-                        st.session_state.temp_stars = None
-                        st.session_state.current_eval_index += 1
-                        st.rerun()
+                    # Skip buttons at bottom
+                    skip_col1, skip_col2 = st.columns(2)
+                    with skip_col1:
+                        if st.button("⏭️ Skip", use_container_width=True, key=f"skip_{current_idx}_{current_metric_idx}"):
+                            st.session_state.scores.append({
+                                'pair_index': current_idx,
+                                'metric': current_metric,
+                                'baseline_path': result['baseline']['image_path'],
+                                'lora_path': result['lora']['image_path'],
+                                'weight': result['weight'],
+                                'prompt': result['prompt'],
+                                'seed': result['seed'],
+                                'choice': 'skip',
+                                'stars': None,
+                                'lora_better': None
+                            })
+                            st.session_state.temp_choice = None
+                            st.session_state.temp_stars = None
+                            # Move to next metric or next pair
+                            if current_metric_idx + 1 < len(metrics):
+                                st.session_state.current_metric_index += 1
+                            else:
+                                st.session_state.current_metric_index = 0
+                                st.session_state.current_eval_index += 1
+                            st.rerun()
+                    
+                    with skip_col2:
+                        if st.button("⏩ Skip to End", use_container_width=True, key=f"skip_all_{current_idx}_{current_metric_idx}"):
+                            # Skip all remaining evaluations
+                            st.session_state.evaluation_complete = True
+                            st.success("Skipped to end!")
+                            st.rerun()
     
     # ===== TAB 4: REPORT =====
     with tab4:

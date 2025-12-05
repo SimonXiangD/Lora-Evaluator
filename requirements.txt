@@ -4,3 +4,4 @@ requests
 websocket-client
 matplotlib
 Pillow
+google-genai

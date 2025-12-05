@@ -1,0 +1,15 @@
+Generate 2-3 image generation prompt pairs based on this description: "{description}"
+    
+Return a JSON array of objects, each with 'positive' and 'negative' keys.
+Positive prompts should be detailed and descriptive.
+Negative prompts should list common artifacts to avoid.
+
+Example format:
+{
+  "prompts": [
+    {
+      "positive": "detailed prompt here",
+      "negative": "bad quality, artifacts"
+    }
+  ]
+}
