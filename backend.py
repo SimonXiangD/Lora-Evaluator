@@ -34,8 +34,7 @@ class ComfyRunner:
         self.client_id = str(uuid.uuid4())
         self.output_dir = output_dir if output_dir else "./output"
         
-        # Ensure output directory exists
-        os.makedirs(self.output_dir, exist_ok=True)
+        # Note: Directory will be created on first use, not at init
         
     def load_workflow(self):
         """Load workflow from JSON file."""
@@ -167,6 +166,9 @@ class ComfyRunner:
                     image_info.get("subfolder", ""),
                     image_info.get("type", "output")
                 )
+                
+                # Ensure output directory exists (lazy creation)
+                os.makedirs(self.output_dir, exist_ok=True)
                 
                 # Generate output filename
                 safe_prompt = "".join(c if c.isalnum() or c in (' ', '_') else '_' for c in prompt[:30])

@@ -466,7 +466,7 @@ def main():
     st.sidebar.caption(f"Step: {current_step}. {step_names[current_step]}")
     
     # Session actions
-    col_new, col_save = st.sidebar.columns(2)
+    col_new, col_save, col_save_new = st.sidebar.columns(3)
     with col_new:
         if st.button("🆕 New", help="Start a new session"):
             new_id = create_new_session()
@@ -479,6 +479,38 @@ def main():
                 st.sidebar.success("✅ Saved!")
                 time.sleep(1)
                 st.rerun()
+    with col_save_new:
+        if st.button("💾 Save New", help="Save as a new session (copy)"):
+            # Create new session ID but keep all data
+            old_id = st.session_state.session_id
+            new_id = time.strftime("%Y%m%d_%H%M%S")
+            st.session_state.session_id = new_id
+            
+            # Save to new session folder
+            if save_session_state(new_id):
+                import shutil
+                old_session_dir = get_session_dir(old_id)
+                new_session_dir = get_session_dir(new_id)
+                
+                # Copy images from old session to new session
+                old_output = get_session_output_dir(old_id)
+                new_output = get_session_output_dir(new_id)
+                if os.path.exists(old_output):
+                    shutil.copytree(old_output, new_output, dirs_exist_ok=True)
+                
+                # Copy report markdown if exists
+                old_report = os.path.join(old_session_dir, "lora_report.md")
+                new_report = os.path.join(new_session_dir, "lora_report.md")
+                if os.path.exists(old_report):
+                    shutil.copy2(old_report, new_report)
+                
+                st.sidebar.success(f"✅ Saved as: {new_id}")
+                time.sleep(1)
+                st.rerun()
+            else:
+                # Restore old ID on failure
+                st.session_state.session_id = old_id
+                st.sidebar.error("❌ Failed to save")
     
     # Load existing sessions
     st.sidebar.divider()
@@ -902,10 +934,23 @@ def main():
     with tab3:
         st.header("Step 3: Blind Image Evaluation")
         
+        # Redo Evaluation button (always visible if generation is complete)
+        if st.session_state.generation_complete:
+            if st.button("🔄 Redo Evaluation", help="Clear all evaluation data and start over", type="secondary"):
+                # Clear evaluation state
+                st.session_state.evaluation_complete = False
+                st.session_state.current_eval_index = 0
+                st.session_state.current_metric_index = 0
+                st.session_state.scores = []
+                st.success("✅ Evaluation data cleared. You can start evaluating again.")
+                time.sleep(1)
+                st.rerun()
+        
         if not st.session_state.generation_complete:
             st.info("⏳ Please complete generation first")
         elif st.session_state.evaluation_complete:
             st.success("✅ Evaluation complete! Check the Report tab for results.")
+            st.info("💡 Use the 'Redo Evaluation' button above to re-evaluate from scratch.")
         else:
             shuffled_results = st.session_state.shuffled_results
             metrics = st.session_state.metrics_for_evaluation
@@ -1126,6 +1171,34 @@ def main():
     with tab4:
         st.header("Step 4: Evaluation Report")
         
+        # Redo buttons at the top
+        if st.session_state.evaluation_complete:
+            col_redo1, col_redo2 = st.columns(2)
+            with col_redo1:
+                if st.button("🔄 Redo Report Only", help="Keep evaluation data but regenerate report", type="secondary"):
+                    # Delete existing report file to force regeneration
+                    current_session_id = get_session_id()
+                    report_file = os.path.join(get_session_dir(current_session_id), "lora_report.md")
+                    if os.path.exists(report_file):
+                        os.remove(report_file)
+                        st.info("📝 Old report deleted.")
+                    
+                    # Set flag to auto-generate on rerun
+                    st.session_state['force_regenerate_report'] = True
+                    st.success("✅ Regenerating report...")
+                    time.sleep(1)
+                    st.rerun()
+            with col_redo2:
+                if st.button("🔄 Redo Evaluation & Report", help="Clear evaluation and report data", type="secondary"):
+                    # Clear both evaluation and report
+                    st.session_state.evaluation_complete = False
+                    st.session_state.current_eval_index = 0
+                    st.session_state.current_metric_index = 0
+                    st.session_state.scores = []
+                    st.success("✅ Evaluation and report data cleared. Please go to Evaluation tab.")
+                    time.sleep(1)
+                    st.rerun()
+        
         if not st.session_state.evaluation_complete:
             st.info("⏳ Please complete evaluation first")
         else:
@@ -1136,6 +1209,43 @@ def main():
                 scored_df = scores_df[scores_df['choice'] != 'skip'].copy()
                 
                 if len(scored_df) > 0:
+                    # ===== Data Preprocessing (Section 3 of spec) =====
+                    # Create derived columns: is_win and calc_score
+                    def derive_is_win(row):
+                        """Determine if LoRA won based on lora_better and choice"""
+                        lora_better = row['lora_better']
+                        choice = row['choice']
+                        
+                        # Handle lora_better as boolean or string
+                        if pd.isna(lora_better) or lora_better == '' or lora_better == 'False' or lora_better == False:
+                            # Case: NaN/Empty or False -> LoRA did not win
+                            return False
+                        elif lora_better == 'True' or lora_better == True:
+                            # Case: LoRA was better
+                            return True
+                        else:
+                            return False
+                    
+                    def derive_calc_score(row):
+                        """Calculate score: 5/3/0 based on stars and is_win"""
+                        is_win = row['is_win']
+                        stars = row.get('stars')
+                        
+                        if not is_win:
+                            # LoRA lost or tied -> score is 0
+                            return 0.0
+                        else:
+                            # LoRA won
+                            if pd.notna(stars) and stars > 0:
+                                return float(stars)
+                            else:
+                                # Default medium intensity
+                                return 3.0
+                    
+                    # Apply preprocessing
+                    scored_df['is_win'] = scored_df.apply(derive_is_win, axis=1)
+                    scored_df['calc_score'] = scored_df.apply(derive_calc_score, axis=1)
+                    
                     # Calculate statistics by metric and weight
                     st.subheader("📊 Results by Metric")
                     
@@ -1144,48 +1254,64 @@ def main():
                         if len(metric_df) > 0:
                             st.write(f"**{metric}**")
                             
-                            # Count lora_better results by weight
+                            # ===== Algorithm A: Metric-Specific Analysis =====
+                            # 1. Win Rate Analysis: Group by weight, calculate mean(is_win)
                             weight_stats = metric_df.groupby('weight').agg({
-                                'lora_better': lambda x: x.sum(),  # Count True values
+                                'is_win': 'mean',  # Win rate (percentage where LoRA was better)
+                                'calc_score': 'mean',  # Average quality score
                                 'pair_index': 'count'  # Total count
                             }).reset_index()
-                            weight_stats.columns = ['weight', 'lora_better_count', 'total_count']
-                            weight_stats['lora_better_rate'] = weight_stats['lora_better_count'] / weight_stats['total_count']
+                            weight_stats.columns = ['weight', 'win_rate', 'avg_quality', 'total_count']
                             
-                            # Calculate average star rating for "better" choices
-                            better_df = metric_df[metric_df['lora_better'] == True].copy()
-                            if len(better_df) > 0 and 'stars' in better_df.columns:
-                                star_stats = better_df.groupby('weight')['stars'].mean().reset_index()
-                                star_stats.columns = ['weight', 'avg_stars']
-                                weight_stats = weight_stats.merge(star_stats, on='weight', how='left')
+                            # 3. Optimal Weight Discovery: highest win rate, tie-breaker by avg_quality
+                            weight_stats_sorted = weight_stats.sort_values(
+                                by=['win_rate', 'avg_quality'], 
+                                ascending=[False, False]
+                            )
+                            optimal_weight = weight_stats_sorted.iloc[0]['weight']
+                            optimal_win_rate = weight_stats_sorted.iloc[0]['win_rate']
                             
                             st.dataframe(weight_stats, use_container_width=True)
+                            st.info(f"🏆 Optimal Weight for {metric}: **{optimal_weight}** (Win Rate: {optimal_win_rate:.1%})")
+                            
+                            # 4. Prompt Compatibility Analysis
+                            prompt_stats = metric_df.groupby('prompt').agg({
+                                'calc_score': 'mean',
+                                'is_win': 'mean',
+                                'pair_index': 'count'
+                            }).reset_index()
+                            prompt_stats.columns = ['prompt', 'avg_quality', 'win_rate', 'count']
+                            prompt_stats = prompt_stats.sort_values('avg_quality', ascending=False)
+                            
+                            if len(prompt_stats) >= 2:
+                                st.write("**Top Performing Prompts:**")
+                                for i, (_, row) in enumerate(prompt_stats.head(2).iterrows()):
+                                    prompt_text = row['prompt'][:80] + '...' if len(row['prompt']) > 80 else row['prompt']
+                                    st.write(f"{i+1}. {prompt_text} (Quality: {row['avg_quality']:.2f}, Win Rate: {row['win_rate']:.1%})")
+                                
+                                st.write("**Worst Performing Prompts:**")
+                                for i, (_, row) in enumerate(prompt_stats.tail(2).iterrows()):
+                                    prompt_text = row['prompt'][:80] + '...' if len(row['prompt']) > 80 else row['prompt']
+                                    st.write(f"{i+1}. {prompt_text} (Quality: {row['avg_quality']:.2f}, Win Rate: {row['win_rate']:.1%})")
                             
                             # Chart for this metric
                             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
                             
-                            # Success rate chart
-                            ax1.plot(weight_stats['weight'], weight_stats['lora_better_rate'], marker='o', linewidth=2, markersize=8, color='#1f77b4')
+                            # Win rate chart (updated to use is_win)
+                            ax1.plot(weight_stats['weight'], weight_stats['win_rate'], marker='o', linewidth=2, markersize=8, color='#1f77b4')
                             ax1.set_xlabel('LoRA Weight', fontsize=11)
-                            ax1.set_ylabel('LoRA Better Rate', fontsize=11)
-                            ax1.set_title(f'{metric} - LoRA Better Rate by Weight', fontsize=12, fontweight='bold')
+                            ax1.set_ylabel('Win Rate', fontsize=11)
+                            ax1.set_title(f'{metric} - Win Rate by Weight', fontsize=12, fontweight='bold')
                             ax1.grid(True, alpha=0.3)
                             ax1.set_ylim(0, 1)
                             
-                            # Star rating chart (if available)
-                            if 'avg_stars' in weight_stats.columns:
-                                star_data = weight_stats.dropna(subset=['avg_stars'])
-                                if len(star_data) > 0:
-                                    ax2.plot(star_data['weight'], star_data['avg_stars'], marker='*', linewidth=2, markersize=12, color='#ff7f0e')
-                                    ax2.set_xlabel('LoRA Weight', fontsize=11)
-                                    ax2.set_ylabel('Average Star Rating', fontsize=11)
-                                    ax2.set_title(f'{metric} - Avg Quality Rating', fontsize=12, fontweight='bold')
-                                    ax2.grid(True, alpha=0.3)
-                                    ax2.set_ylim(0, 5.5)
-                                else:
-                                    ax2.text(0.5, 0.5, 'No star ratings', ha='center', va='center', transform=ax2.transAxes)
-                            else:
-                                ax2.text(0.5, 0.5, 'No star ratings', ha='center', va='center', transform=ax2.transAxes)
+                            # Quality score chart
+                            ax2.plot(weight_stats['weight'], weight_stats['avg_quality'], marker='*', linewidth=2, markersize=12, color='#ff7f0e')
+                            ax2.set_xlabel('LoRA Weight', fontsize=11)
+                            ax2.set_ylabel('Average Quality Score', fontsize=11)
+                            ax2.set_title(f'{metric} - Avg Quality (0-5 scale)', fontsize=12, fontweight='bold')
+                            ax2.grid(True, alpha=0.3)
+                            ax2.set_ylim(0, 5.5)
                             
                             plt.tight_layout()
                             st.pyplot(fig)
@@ -1196,33 +1322,50 @@ def main():
                     st.divider()
                     st.subheader("📊 Overall Summary")
                     overall_stats = scored_df.groupby('weight').agg({
-                        'lora_better': lambda x: x.sum(),
+                        'is_win': 'mean',
+                        'calc_score': 'mean',
                         'pair_index': 'count'
                     }).reset_index()
-                    overall_stats.columns = ['weight', 'lora_better_count', 'total_count']
-                    overall_stats['lora_better_rate'] = overall_stats['lora_better_count'] / overall_stats['total_count']
+                    overall_stats.columns = ['weight', 'win_rate', 'avg_quality', 'total_count']
                     
                     st.dataframe(overall_stats, use_container_width=True)
                     
                     if len(overall_stats) > 0:
-                        best_weight = overall_stats.loc[overall_stats['lora_better_rate'].idxmax(), 'weight']
-                        best_rate = overall_stats.loc[overall_stats['lora_better_rate'].idxmax(), 'lora_better_rate']
-                        st.success(f"🏆 Best Weight (Overall): **{best_weight}** (LoRA Better Rate: {best_rate:.1%})")
+                        overall_sorted = overall_stats.sort_values(by=['win_rate', 'avg_quality'], ascending=[False, False])
+                        best_weight = overall_sorted.iloc[0]['weight']
+                        best_rate = overall_sorted.iloc[0]['win_rate']
+                        best_quality = overall_sorted.iloc[0]['avg_quality']
+                        st.success(f"🏆 Best Weight (Overall): **{best_weight}** (Win Rate: {best_rate:.1%}, Quality: {best_quality:.2f})")
                     
-                    # Show best images (pairs where lora was better)
-                    st.subheader("🌟 Top Rated Pairs (LoRA Better)")
-                    best_images = scored_df[scored_df['lora_better'] == True].copy()
-                    if 'stars' in best_images.columns:
-                        best_images = best_images.dropna(subset=['stars']).nlargest(6, 'stars')
+                    # ===== Algorithm B: Visual Evidence Selector =====
+                    st.subheader("🌟 Visual Evidence")
+                    
+                    # Success Case: is_win == True AND stars >= 4 (or calc_score >= 4)
+                    success_cases = scored_df[scored_df['is_win'] == True].copy()
+                    success_cases = success_cases[success_cases['calc_score'] >= 4.0]
+                    success_cases = success_cases.nlargest(3, 'calc_score') if len(success_cases) > 0 else pd.DataFrame()
+                    
+                    # Failure Case: is_win == False (preferably choice != 'same')
+                    failure_cases = scored_df[scored_df['is_win'] == False].copy()
+                    failure_cases = failure_cases[failure_cases['choice'] != 'same'] if len(failure_cases) > 0 else failure_cases
+                    failure_cases = failure_cases.head(3) if len(failure_cases) > 0 else pd.DataFrame()
+                    
+                    # Display Success Cases
+                    if len(success_cases) > 0:
+                        st.write("**✅ Success Cases** (LoRA performed well)")
+                        best_images = success_cases
                     else:
-                        best_images = best_images.head(6)
+                        st.write("**🌟 Top Rated Pairs**")
+                        best_images = scored_df[scored_df['is_win'] == True].nlargest(3, 'calc_score') if len(scored_df[scored_df['is_win'] == True]) > 0 else scored_df.head(3)
                     
                     for idx, (_, row) in enumerate(best_images.iterrows()):
                         if idx % 2 == 0:
                             cols = st.columns(2)
                         
                         with cols[idx % 2]:
-                            st.write(f"**Weight: {row['weight']}** - Rating: {'⭐' * int(row['stars']) if pd.notna(row.get('stars')) else 'N/A'}")
+                            quality_display = '⭐' * int(row['calc_score']) if row['calc_score'] > 0 else 'N/A'
+                            st.write(f"**Weight: {row['weight']}** - Quality: {quality_display} ({row['calc_score']:.1f})")
+                            st.caption(f"Metric: {row['metric']}")
                             sub_cols = st.columns(2)
                             with sub_cols[0]:
                                 if os.path.exists(row['baseline_path']):
@@ -1232,14 +1375,153 @@ def main():
                                 if os.path.exists(row['lora_path']):
                                     img = Image.open(row['lora_path'])
                                     st.image(img, caption="With LoRA", use_container_width=True)
-                            st.caption(f"Prompt: {row['prompt'][:50]}...")
+                            st.caption(f"Prompt: {row['prompt'][:60]}...")
                             st.divider()
                     
+                    # Display Failure Cases
+                    if len(failure_cases) > 0:
+                        st.write("**❌ Failure Cases** (LoRA did not improve)")
+                        for idx, (_, row) in enumerate(failure_cases.iterrows()):
+                            if idx % 2 == 0:
+                                cols = st.columns(2)
+                            
+                            with cols[idx % 2]:
+                                st.write(f"**Weight: {row['weight']}** - Metric: {row['metric']}")
+                                st.caption(f"Choice: {row['choice']}")
+                                sub_cols = st.columns(2)
+                                with sub_cols[0]:
+                                    if os.path.exists(row['baseline_path']):
+                                        img = Image.open(row['baseline_path'])
+                                        st.image(img, caption="Baseline (Better)", use_container_width=True)
+                                with sub_cols[1]:
+                                    if os.path.exists(row['lora_path']):
+                                        img = Image.open(row['lora_path'])
+                                        st.image(img, caption="LoRA (Worse)", use_container_width=True)
+                                st.caption(f"Prompt: {row['prompt'][:60]}...")
+                                st.divider()
+                    
+                    # ===== LLM Report Generation =====
+                    st.divider()
+                    st.subheader("📝 AI-Generated Report")
+                    
+                    # Prepare analysis data for LLM
+                    metrics_analysis = {}
+                    for metric in st.session_state.metrics_for_evaluation:
+                        metric_df = scored_df[scored_df['metric'] == metric].copy()
+                        if len(metric_df) > 0:
+                            # Calculate stats
+                            weight_stats = metric_df.groupby('weight').agg({
+                                'is_win': 'mean',
+                                'calc_score': 'mean'
+                            }).reset_index()
+                            weight_stats_sorted = weight_stats.sort_values(
+                                by=['is_win', 'calc_score'], 
+                                ascending=[False, False]
+                            )
+                            
+                            # Get best weight and prompts
+                            best_weight = weight_stats_sorted.iloc[0]['weight']
+                            best_win_rate = weight_stats_sorted.iloc[0]['is_win']
+                            
+                            # Prompt analysis
+                            prompt_stats = metric_df.groupby('prompt')['calc_score'].mean().sort_values(ascending=False)
+                            best_prompts = prompt_stats.head(2).index.tolist() if len(prompt_stats) >= 2 else prompt_stats.index.tolist()
+                            worst_prompts = prompt_stats.tail(2).index.tolist() if len(prompt_stats) >= 2 else []
+                            
+                            metrics_analysis[metric] = {
+                                'best_weight': float(best_weight),
+                                'win_rate_at_best': float(best_win_rate),
+                                'best_prompts': [p[:100] for p in best_prompts],
+                                'worst_prompts': [p[:100] for p in worst_prompts]
+                            }
+                    
+                    # Generate or load report
+                    current_session_id = get_session_id()
+                    report_file = os.path.join(get_session_dir(current_session_id), "lora_report.md")
+                    
+                    # Check if auto-generate is triggered
+                    auto_generate = 'force_regenerate_report' in st.session_state
+                    if auto_generate:
+                        del st.session_state['force_regenerate_report']
+                    
+                    if st.button("🤖 Generate AI Report", type="primary") or auto_generate:
+                        # Show progress indicator
+                        progress_placeholder = st.empty()
+                        progress_placeholder.info("🔄 Preparing to generate report...")
+                        
+                        with st.spinner("🤖 Generating report with AI... This may take 10-30 seconds."):
+                            try:
+                                # Prepare payload
+                                payload = {
+                                    "lora_name": st.session_state.get('lora_filename', 'Unknown LoRA'),
+                                    "metrics_analysis": metrics_analysis
+                                }
+                                
+                                # Get API key
+                                api_key = os.environ.get("GEMINI_API_KEY", decode_key(DEFAULT_ENCODED_KEY))
+                                client = genai.Client(api_key=api_key)
+                                
+                                # System prompt
+                                system_prompt = """You are an expert AI Model Evaluator.
+Write a multi-dimensional performance report for a LoRA model based on the provided statistics.
+
+Structure:
+1. **Executive Summary**: Overall verdict on the LoRA's utility.
+2. **Metric-by-Metric Analysis**:
+   - Create a subsection for EACH metric (e.g., "### Metric: Not Ugly").
+   - For each metric, state the Optimal Weight and Win Rate.
+   - Discuss which prompts worked best for that specific metric.
+3. **Conclusion**: Final recommendation on how to use this LoRA.
+
+Format: Markdown."""
+                                
+                                # Generate report
+                                progress_placeholder.info("🤖 Calling AI API...")
+                                response = client.models.generate_content(
+                                    model='gemini-2.5-flash',
+                                    contents=f"{system_prompt}\n\nAnalysis Data:\n{json.dumps(payload, indent=2)}"
+                                )
+                                
+                                report_md = response.text
+                                
+                                # Save to file
+                                progress_placeholder.info("💾 Saving report...")
+                                with open(report_file, 'w', encoding='utf-8') as f:
+                                    f.write(report_md)
+                                
+                                progress_placeholder.success("✅ Report generated and saved!")
+                                st.session_state['report_generated'] = True
+                                time.sleep(2)  # Let user see the success message
+                                st.rerun()
+                                
+                            except Exception as e:
+                                progress_placeholder.error(f"❌ Failed to generate report: {str(e)}")
+                                report_md = None
+                    
+                    # Display existing report if available
+                    if os.path.exists(report_file):
+                        with open(report_file, 'r', encoding='utf-8') as f:
+                            report_md = f.read()
+                        
+                        st.markdown("---")
+                        st.markdown(report_md)
+                        
+                        # Download markdown button
+                        st.download_button(
+                            label="📥 Download Report (Markdown)",
+                            data=report_md.encode('utf-8'),
+                            file_name=f"lora_report_{st.session_state.get('lora_filename', 'unknown')}.md",
+                            mime="text/markdown"
+                        )
+                    else:
+                        st.info("💡 Click 'Generate AI Report' to create a comprehensive analysis using AI.")
+                    
                     # Download results
-                    st.subheader("💾 Download Results")
+                    st.divider()
+                    st.subheader("💾 Download Data")
                     csv = scores_df.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label="Download Scores CSV",
+                        label="📥 Download Scores CSV",
                         data=csv,
                         file_name="lora_evaluation_scores.csv",
                         mime="text/csv"
