@@ -198,6 +198,7 @@ class ComfyRunner:
     def generate_batch(self, lora_name, weight_range, prompts, base_seed=None, negative_prompt=None, progress_callback=None):
         """
         Generate a batch of images for weight x prompt combinations.
+        Creates paired images: baseline (weight=0) and lora (weight=X) for each prompt+seed.
         
         Args:
             lora_name: Name of the LoRA file
@@ -208,20 +209,23 @@ class ComfyRunner:
             progress_callback: Function to call with progress updates (current, total)
             
         Returns:
-            List of result dictionaries
+            List of paired result dictionaries with 'baseline' and 'lora' keys
         """
         if base_seed is None:
             base_seed = int(time.time())
         
-        # Generate weight values
+        # Generate weight values (excluding 0 as it's the baseline)
         min_weight, max_weight, step = weight_range
         weights = []
         current = min_weight
         while current <= max_weight:
-            weights.append(round(current, 2))
+            w = round(current, 2)
+            if w != 0:  # Skip 0 as baseline is generated separately
+                weights.append(w)
             current += step
         
-        total_generations = len(weights) * len(prompts)
+        # Total: baseline + lora for each weight x prompt combination
+        total_generations = len(weights) * len(prompts) * 2
         results = []
         
         # Initialize CSV log
@@ -229,7 +233,7 @@ class ComfyRunner:
         csv_exists = os.path.exists(log_path)
         
         with open(log_path, 'a', newline='', encoding='utf-8') as csvfile:
-            fieldnames = ['timestamp', 'image_path', 'lora_name', 'weight', 'prompt', 'seed']
+            fieldnames = ['timestamp', 'image_path', 'lora_name', 'weight', 'prompt', 'seed', 'is_baseline']
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             if not csv_exists:
@@ -240,16 +244,40 @@ class ComfyRunner:
             
             for weight in weights:
                 for prompt in prompts:
+                    # Generate baseline (weight=0) with same seed and prompt
                     current_generation += 1
-                    
                     if progress_callback:
                         progress_callback(current_generation, total_generations)
                     
-                    result = self.generate_single(lora_name, weight, prompt, seed, negative_prompt)
+                    baseline_result = self.generate_single(lora_name, 0.0, prompt, seed, negative_prompt)
                     
-                    if result:
-                        results.append(result)
-                        writer.writerow(result)
+                    # Generate LoRA image with specified weight
+                    current_generation += 1
+                    if progress_callback:
+                        progress_callback(current_generation, total_generations)
+                    
+                    lora_result = self.generate_single(lora_name, weight, prompt, seed, negative_prompt)
+                    
+                    if baseline_result and lora_result:
+                        # Create paired result
+                        paired_result = {
+                            'baseline': baseline_result,
+                            'lora': lora_result,
+                            'weight': weight,
+                            'prompt': prompt,
+                            'seed': seed
+                        }
+                        results.append(paired_result)
+                        
+                        # Log both images
+                        baseline_log = baseline_result.copy()
+                        baseline_log['is_baseline'] = True
+                        writer.writerow(baseline_log)
+                        
+                        lora_log = lora_result.copy()
+                        lora_log['is_baseline'] = False
+                        writer.writerow(lora_log)
+                        
                         csvfile.flush()  # Ensure data is written immediately
                     
                     seed += 1

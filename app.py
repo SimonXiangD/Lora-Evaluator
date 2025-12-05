@@ -139,25 +139,25 @@ def main():
                 st.exception(e)
         
         elif st.session_state.generation_complete:
-            st.success(f"✅ Generation complete! {len(st.session_state.results)} images created.")
+            st.success(f"✅ Generation complete! {len(st.session_state.results)} pairs created.")
             
-            # Show generated images in a grid
-            st.subheader("Generated Images")
+            # Show generated image pairs in a grid
+            st.subheader("Generated Image Pairs")
             
             if st.session_state.results:
-                cols_per_row = 3
-                for i in range(0, len(st.session_state.results), cols_per_row):
-                    cols = st.columns(cols_per_row)
-                    for j, col in enumerate(cols):
-                        idx = i + j
-                        if idx < len(st.session_state.results):
-                            result = st.session_state.results[idx]
-                            with col:
-                                if os.path.exists(result['image_path']):
-                                    img = Image.open(result['image_path'])
-                                    st.image(img, use_container_width=True)
-                                    st.caption(f"Weight: {result['weight']}")
-                                    st.caption(f"Prompt: {result['prompt'][:40]}...")
+                for idx, result in enumerate(st.session_state.results):
+                    with st.expander(f"Pair {idx+1}: Weight {result['weight']} - {result['prompt'][:50]}..."):
+                        cols = st.columns(2)
+                        with cols[0]:
+                            st.write("**Without LoRA (Weight=0)**")
+                            if os.path.exists(result['baseline']['image_path']):
+                                img = Image.open(result['baseline']['image_path'])
+                                st.image(img, use_container_width=True)
+                        with cols[1]:
+                            st.write(f"**With LoRA (Weight={result['weight']})**")
+                            if os.path.exists(result['lora']['image_path']):
+                                img = Image.open(result['lora']['image_path'])
+                                st.image(img, use_container_width=True)
         else:
             st.info("👈 Please configure parameters in the Setup tab and click 'Start Generation'")
     
@@ -187,68 +187,135 @@ def main():
                 result = results[current_idx]
                 
                 st.progress((current_idx + 1) / len(results))
-                st.write(f"Image {current_idx + 1} of {len(results)}")
+                st.write(f"Pair {current_idx + 1} of {len(results)}")
                 
-                col1, col2 = st.columns(2)
+                # Main layout: images on left (70%), controls on right (30%)
+                col_images, col_controls = st.columns([7, 3])
                 
-                with col1:
-                    st.subheader("Baseline (Weight = 0)")
-                    # For baseline, we show the first image with lowest weight or a placeholder
-                    baseline_results = [r for r in results if r['weight'] == 0]
-                    if baseline_results and os.path.exists(baseline_results[0]['image_path']):
-                        baseline_img = Image.open(baseline_results[0]['image_path'])
-                        st.image(baseline_img, use_container_width=True)
+                with col_images:
+                    # Side-by-side image comparison
+                    img_col1, img_col2 = st.columns(2)
+                    
+                    with img_col1:
+                        st.markdown("### 🔵 Without LoRA (Weight = 0)")
+                        baseline_path = result['baseline']['image_path']
+                        if os.path.exists(baseline_path):
+                            baseline_img = Image.open(baseline_path)
+                            st.image(baseline_img, use_container_width=True)
+                        else:
+                            st.error("Baseline image not found")
+                    
+                    with img_col2:
+                        st.markdown(f"### 🟢 With LoRA (Weight = {result['weight']})")
+                        lora_path = result['lora']['image_path']
+                        if os.path.exists(lora_path):
+                            lora_img = Image.open(lora_path)
+                            st.image(lora_img, use_container_width=True)
+                        else:
+                            st.error("LoRA image not found")
+                    
+                    # Display metadata below images
+                    st.write(f"**Prompt:** {result['prompt']}")
+                    st.write(f"**Seed:** {result['seed']}")
+                
+                with col_controls:
+                    st.markdown("### 📊 Rate This Pair")
+                    st.write("")
+                    
+                    # Initialize temp rating state for this comparison
+                    if 'temp_choice' not in st.session_state:
+                        st.session_state.temp_choice = None
+                    if 'temp_stars' not in st.session_state:
+                        st.session_state.temp_stars = None
+                    
+                    # Yes/No buttons (vertical)
+                    if st.button("👍 LoRA is Better", use_container_width=True, type="primary"):
+                        st.session_state.temp_choice = 'yes'
+                    
+                    if st.button("👎 LoRA is Worse", use_container_width=True):
+                        st.session_state.temp_choice = 'no'
+                        st.session_state.temp_stars = None  # Clear stars when choosing No
+                    
+                    if st.button("➖ About the Same", use_container_width=True):
+                        st.session_state.temp_choice = 'same'
+                        st.session_state.temp_stars = None  # Clear stars when choosing Same
+                    
+                    st.write("")
+                    st.divider()
+                    
+                    # Show star rating if Yes is selected
+                    if st.session_state.temp_choice == 'yes':
+                        st.write("**How much better?** (Optional)")
+                        
+                        # Create 5 star buttons in a row
+                        star_cols = st.columns(5)
+                        for i, col in enumerate(star_cols):
+                            star_num = i + 1
+                            with col:
+                                # Show filled or empty star based on selection
+                                if st.session_state.temp_stars and star_num <= st.session_state.temp_stars:
+                                    button_label = "⭐"
+                                    button_type = "primary"
+                                else:
+                                    button_label = "☆"
+                                    button_type = "secondary"
+                                
+                                if st.button(button_label, key=f"star_{star_num}_{current_idx}", use_container_width=True, type=button_type):
+                                    st.session_state.temp_stars = star_num
+                                    st.rerun()
+                        
+                        if st.session_state.temp_stars:
+                            quality_map = {1: "Slightly", 2: "Slightly", 3: "Moderately", 4: "Significantly", 5: "Dramatically"}
+                            st.caption(f"{'⭐' * st.session_state.temp_stars} - {quality_map[st.session_state.temp_stars]} better")
+                        else:
+                            st.caption("Click a star to rate (optional)")
+                    
+                    st.write("")
+                    st.divider()
+                    
+                    # Submit button
+                    if st.session_state.temp_choice:
+                        if st.button("✅ Submit & Next", use_container_width=True, type="secondary"):
+                            # Save the score
+                            score_entry = {
+                                'baseline_path': result['baseline']['image_path'],
+                                'lora_path': result['lora']['image_path'],
+                                'weight': result['weight'],
+                                'prompt': result['prompt'],
+                                'seed': result['seed'],
+                                'choice': st.session_state.temp_choice,
+                                'stars': st.session_state.temp_stars if st.session_state.temp_choice == 'yes' else None,
+                                'is_better': True if st.session_state.temp_choice == 'yes' else False if st.session_state.temp_choice == 'no' else None
+                            }
+                            st.session_state.scores.append(score_entry)
+                            
+                            # Reset temp state
+                            st.session_state.temp_choice = None
+                            st.session_state.temp_stars = None
+                            
+                            # Move to next
+                            st.session_state.current_eval_index += 1
+                            st.rerun()
                     else:
-                        st.info("No baseline image with weight=0. Comparing with LoRA effects.")
-                
-                with col2:
-                    st.subheader(f"LoRA (Weight = {result['weight']})")
-                    if os.path.exists(result['image_path']):
-                        img = Image.open(result['image_path'])
-                        st.image(img, use_container_width=True)
-                    else:
-                        st.error("Image not found")
-                
-                st.write(f"**Prompt:** {result['prompt']}")
-                st.write(f"**Seed:** {result['seed']}")
-                
-                st.subheader("Is the LoRA image (right) better?")
-                
-                col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 2])
-                
-                with col_btn1:
-                    if st.button("👍 Yes", use_container_width=True, type="primary"):
+                        st.info("👆 Please select an option above")
+                    
+                    st.write("")
+                    st.divider()
+                    
+                    # Skip button at bottom
+                    if st.button("⏭️ Skip This Pair", use_container_width=True):
                         st.session_state.scores.append({
-                            'image_path': result['image_path'],
+                            'baseline_path': result['baseline']['image_path'],
+                            'lora_path': result['lora']['image_path'],
                             'weight': result['weight'],
                             'prompt': result['prompt'],
                             'seed': result['seed'],
-                            'is_better': True
-                        })
-                        st.session_state.current_eval_index += 1
-                        st.rerun()
-                
-                with col_btn2:
-                    if st.button("👎 No", use_container_width=True):
-                        st.session_state.scores.append({
-                            'image_path': result['image_path'],
-                            'weight': result['weight'],
-                            'prompt': result['prompt'],
-                            'seed': result['seed'],
-                            'is_better': False
-                        })
-                        st.session_state.current_eval_index += 1
-                        st.rerun()
-                
-                with col_btn3:
-                    if st.button("⏭️ Skip", use_container_width=True):
-                        st.session_state.scores.append({
-                            'image_path': result['image_path'],
-                            'weight': result['weight'],
-                            'prompt': result['prompt'],
-                            'seed': result['seed'],
+                            'choice': 'skip',
+                            'stars': None,
                             'is_better': None
                         })
+                        st.session_state.temp_choice = None
+                        st.session_state.temp_stars = None
                         st.session_state.current_eval_index += 1
                         st.rerun()
     
@@ -263,7 +330,7 @@ def main():
             
             if len(scores_df) > 0:
                 # Filter out skipped evaluations
-                scored_df = scores_df[scores_df['is_better'].notna()].copy()
+                scored_df = scores_df[scores_df['choice'] != 'skip'].copy()
                 
                 if len(scored_df) > 0:
                     # Calculate statistics by weight
@@ -272,37 +339,73 @@ def main():
                     }).reset_index()
                     weight_stats.columns = ['weight', 'yes_count', 'total_count', 'yes_rate']
                     
+                    # Calculate average star rating for "better" choices
+                    better_df = scored_df[scored_df['is_better'] == True].copy()
+                    if len(better_df) > 0 and 'stars' in better_df.columns:
+                        star_stats = better_df.groupby('weight')['stars'].mean().reset_index()
+                        star_stats.columns = ['weight', 'avg_stars']
+                        weight_stats = weight_stats.merge(star_stats, on='weight', how='left')
+                    
                     # Display statistics
                     st.subheader("📊 Results by Weight")
                     st.dataframe(weight_stats, use_container_width=True)
                     
-                    # Line chart
-                    st.subheader("📈 Success Rate by Weight")
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    ax.plot(weight_stats['weight'], weight_stats['yes_rate'], marker='o', linewidth=2, markersize=8)
-                    ax.set_xlabel('LoRA Weight', fontsize=12)
-                    ax.set_ylabel('Success Rate (Yes %)', fontsize=12)
-                    ax.set_title('LoRA Performance by Weight', fontsize=14, fontweight='bold')
-                    ax.grid(True, alpha=0.3)
-                    ax.set_ylim(0, 1)
+                    # Dual chart: Success Rate and Average Stars
+                    st.subheader("📈 Performance by Weight")
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+                    
+                    # Success rate chart
+                    ax1.plot(weight_stats['weight'], weight_stats['yes_rate'], marker='o', linewidth=2, markersize=8, color='#1f77b4')
+                    ax1.set_xlabel('LoRA Weight', fontsize=12)
+                    ax1.set_ylabel('Success Rate', fontsize=12)
+                    ax1.set_title('Success Rate by Weight', fontsize=14, fontweight='bold')
+                    ax1.grid(True, alpha=0.3)
+                    ax1.set_ylim(0, 1)
+                    
+                    # Star rating chart (if available)
+                    if 'avg_stars' in weight_stats.columns:
+                        star_data = weight_stats.dropna(subset=['avg_stars'])
+                        if len(star_data) > 0:
+                            ax2.plot(star_data['weight'], star_data['avg_stars'], marker='⭐', linewidth=2, markersize=12, color='#ff7f0e')
+                            ax2.set_xlabel('LoRA Weight', fontsize=12)
+                            ax2.set_ylabel('Average Star Rating', fontsize=12)
+                            ax2.set_title('Average Quality Rating (for "Better" choices)', fontsize=14, fontweight='bold')
+                            ax2.grid(True, alpha=0.3)
+                            ax2.set_ylim(0, 5.5)
+                    
+                    plt.tight_layout()
                     st.pyplot(fig)
                     
                     # Best weight
                     best_weight = weight_stats.loc[weight_stats['yes_rate'].idxmax(), 'weight']
-                    st.success(f"🏆 Best Weight: **{best_weight}** (Success Rate: {weight_stats.loc[weight_stats['yes_rate'].idxmax(), 'yes_rate']:.1%})")
+                    best_rate = weight_stats.loc[weight_stats['yes_rate'].idxmax(), 'yes_rate']
+                    st.success(f"🏆 Best Weight: **{best_weight}** (Success Rate: {best_rate:.1%})")
                     
-                    # Show best images
-                    st.subheader("🌟 Best Rated Images")
-                    best_images = scored_df[scored_df['is_better'] == True].nlargest(6, 'weight')
+                    # Show best images (pairs)
+                    st.subheader("🌟 Top Rated Pairs")
+                    best_images = scored_df[scored_df['is_better'] == True].copy()
+                    if 'stars' in best_images.columns:
+                        best_images = best_images.nlargest(6, 'stars')
+                    else:
+                        best_images = best_images.head(6)
                     
-                    cols = st.columns(3)
                     for idx, (_, row) in enumerate(best_images.iterrows()):
-                        with cols[idx % 3]:
-                            if os.path.exists(row['image_path']):
-                                img = Image.open(row['image_path'])
-                                st.image(img, use_container_width=True)
-                                st.caption(f"Weight: {row['weight']}")
-                                st.caption(f"Prompt: {row['prompt'][:40]}...")
+                        if idx % 2 == 0:
+                            cols = st.columns(2)
+                        
+                        with cols[idx % 2]:
+                            st.write(f"**Weight: {row['weight']}** - Rating: {'⭐' * int(row['stars']) if pd.notna(row.get('stars')) else 'N/A'}")
+                            sub_cols = st.columns(2)
+                            with sub_cols[0]:
+                                if os.path.exists(row['baseline_path']):
+                                    img = Image.open(row['baseline_path'])
+                                    st.image(img, caption="Without LoRA", use_container_width=True)
+                            with sub_cols[1]:
+                                if os.path.exists(row['lora_path']):
+                                    img = Image.open(row['lora_path'])
+                                    st.image(img, caption="With LoRA", use_container_width=True)
+                            st.caption(f"Prompt: {row['prompt'][:50]}...")
+                            st.divider()
                     
                     # Download results
                     st.subheader("💾 Download Results")
