@@ -28,6 +28,191 @@ def decode_key(encoded_key):
 # To encode a new key: base64.b64encode(b"your_key_here").decode()
 DEFAULT_ENCODED_KEY = "QUl6YVN5QVFlWTg5MTRJQTNzUWpwM2xYSFVKYXFVNDdPSUg3UGRz"
 
+# State save/load directory
+SESSIONS_DIR = "./sessions"
+
+
+def get_session_id():
+    """Get or create session ID for current session"""
+    if 'session_id' not in st.session_state or not st.session_state.session_id:
+        # Create new session ID based on timestamp
+        st.session_state.session_id = time.strftime("%Y%m%d_%H%M%S")
+    return st.session_state.session_id
+
+
+def get_session_dir(session_id=None):
+    """Get session directory path"""
+    if session_id is None:
+        session_id = get_session_id()
+    return os.path.join(SESSIONS_DIR, session_id)
+
+
+def get_session_output_dir(session_id=None):
+    """Get output directory for session images"""
+    return os.path.join(get_session_dir(session_id), "output")
+
+
+def list_available_sessions():
+    """List all available sessions"""
+    if not os.path.exists(SESSIONS_DIR):
+        return []
+    
+    sessions = []
+    for item in os.listdir(SESSIONS_DIR):
+        session_path = os.path.join(SESSIONS_DIR, item)
+        if os.path.isdir(session_path):
+            meta_file = os.path.join(session_path, "session_meta.json")
+            if os.path.exists(meta_file):
+                try:
+                    with open(meta_file, 'r', encoding='utf-8') as f:
+                        meta = json.load(f)
+                    sessions.append({
+                        'id': item,
+                        'path': session_path,
+                        'meta': meta
+                    })
+                except:
+                    pass
+    
+    # Sort by timestamp (newest first)
+    sessions.sort(key=lambda x: x['meta'].get('timestamp', 0), reverse=True)
+    return sessions
+
+
+def save_session_state(session_id=None):
+    """Save current session state to JSON file"""
+    try:
+        if session_id is None:
+            session_id = get_session_id()
+        
+        session_dir = get_session_dir(session_id)
+        os.makedirs(session_dir, exist_ok=True)
+        
+        # Prepare state data
+        state_data = {
+            'session_id': session_id,
+            'timestamp': time.time(),
+            'step_1_setup': {
+                'lora_filename': st.session_state.get('lora_filename'),
+                'weight_range': st.session_state.get('weight_range'),
+                'seeds': st.session_state.get('seeds', []),
+                'metrics': st.session_state.get('metrics', []),
+                'prompt_pairs': st.session_state.get('prompt_pairs', [])
+            },
+            'step_2_generation': {
+                'generation_complete': st.session_state.get('generation_complete', False),
+                'generating': st.session_state.get('generating', False),
+                'results': st.session_state.get('results', []),
+                'shuffled_results': st.session_state.get('shuffled_results', []),
+                'lora_filename': st.session_state.get('lora_filename'),
+                'weight_range': st.session_state.get('weight_range'),
+                'prompt_pairs_for_generation': st.session_state.get('prompt_pairs_for_generation', []),
+                'metrics_for_evaluation': st.session_state.get('metrics_for_evaluation', []),
+                'seeds_for_generation': st.session_state.get('seeds_for_generation', [])
+            },
+            'step_3_evaluation': {
+                'evaluation_complete': st.session_state.get('evaluation_complete', False),
+                'current_eval_index': st.session_state.get('current_eval_index', 0),
+                'current_metric_index': st.session_state.get('current_metric_index', 0),
+                'scores': st.session_state.get('scores', [])
+            },
+            'step_4_report': {
+                'report_generated': st.session_state.get('evaluation_complete', False)
+            }
+        }
+        
+        # Save main state file
+        state_file = os.path.join(session_dir, "session_meta.json")
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(state_data, f, indent=2, ensure_ascii=False)
+        
+        return True
+    except Exception as e:
+        print(f"Error saving session state: {e}")
+        return False
+
+
+def load_session_state(session_id):
+    """Load session state from JSON file"""
+    try:
+        session_dir = get_session_dir(session_id)
+        state_file = os.path.join(session_dir, "session_meta.json")
+        
+        if not os.path.exists(state_file):
+            return False
+        
+        with open(state_file, 'r', encoding='utf-8') as f:
+            state_data = json.load(f)
+        
+        # Set session ID
+        st.session_state.session_id = session_id
+        
+        # Restore step 1 (Setup)
+        setup = state_data.get('step_1_setup', {})
+        if setup.get('seeds'):
+            st.session_state.seeds = setup['seeds']
+        if setup.get('metrics'):
+            st.session_state.metrics = setup['metrics']
+        if setup.get('prompt_pairs'):
+            st.session_state.prompt_pairs = setup['prompt_pairs']
+        
+        # Restore step 2 (Generation)
+        generation = state_data.get('step_2_generation', {})
+        st.session_state.generation_complete = generation.get('generation_complete', False)
+        st.session_state.generating = generation.get('generating', False)
+        st.session_state.results = generation.get('results', [])
+        st.session_state.shuffled_results = generation.get('shuffled_results', [])
+        if generation.get('lora_filename'):
+            st.session_state.lora_filename = generation['lora_filename']
+        if generation.get('weight_range'):
+            st.session_state.weight_range = tuple(generation['weight_range'])
+        if generation.get('prompt_pairs_for_generation'):
+            st.session_state.prompt_pairs_for_generation = generation['prompt_pairs_for_generation']
+        if generation.get('metrics_for_evaluation'):
+            st.session_state.metrics_for_evaluation = generation['metrics_for_evaluation']
+        if generation.get('seeds_for_generation'):
+            st.session_state.seeds_for_generation = generation['seeds_for_generation']
+        
+        # Restore step 3 (Evaluation)
+        evaluation = state_data.get('step_3_evaluation', {})
+        st.session_state.evaluation_complete = evaluation.get('evaluation_complete', False)
+        st.session_state.current_eval_index = evaluation.get('current_eval_index', 0)
+        st.session_state.current_metric_index = evaluation.get('current_metric_index', 0)
+        st.session_state.scores = evaluation.get('scores', [])
+        
+        return True
+    except Exception as e:
+        print(f"Error loading session state: {e}")
+        return False
+
+
+def create_new_session():
+    """Create a new session and clear current state"""
+    # Clear current session state
+    for key in ['session_id', 'generation_complete', 'results', 'shuffled_results', 
+                'current_eval_index', 'current_metric_index', 'scores', 
+                'evaluation_complete', 'generating']:
+        if key in st.session_state:
+            del st.session_state[key]
+    
+    # Create new session ID
+    new_id = time.strftime("%Y%m%d_%H%M%S")
+    st.session_state.session_id = new_id
+    
+    return new_id
+
+
+def get_current_step():
+    """Determine current step based on session state"""
+    if st.session_state.get('evaluation_complete', False):
+        return 4  # Report
+    elif st.session_state.get('generation_complete', False):
+        return 3  # Evaluation
+    elif st.session_state.get('generating', False) or len(st.session_state.get('results', [])) > 0:
+        return 2  # Generation
+    else:
+        return 1  # Setup
+
 
 # Initialize session state
 if 'generation_complete' not in st.session_state:
@@ -53,6 +238,8 @@ if 'prompt_pairs' not in st.session_state:
 if 'seeds' not in st.session_state:
     import random
     st.session_state.seeds = [random.randint(1, 1000000)]
+if 'session_loaded' not in st.session_state:
+    st.session_state.session_loaded = False
 
 
 def call_llm(prompt, api_key, model="gemini-2.5-flash"):
@@ -266,8 +453,72 @@ def main():
     st.sidebar.header("Configuration")
     comfyui_url = st.sidebar.text_input("ComfyUI Server", "127.0.0.1:8188")
     
-    # Initialize ComfyRunner
-    runner = ComfyRunner(server_address=comfyui_url)
+    # Session management in sidebar
+    st.sidebar.divider()
+    st.sidebar.subheader("💾 Session Management")
+    
+    # Current session info
+    current_session_id = get_session_id()
+    st.sidebar.info(f"**Current Session:**\n`{current_session_id}`")
+    
+    current_step = get_current_step()
+    step_names = {1: "Setup", 2: "Generation", 3: "Evaluation", 4: "Report"}
+    st.sidebar.caption(f"Step: {current_step}. {step_names[current_step]}")
+    
+    # Session actions
+    col_new, col_save = st.sidebar.columns(2)
+    with col_new:
+        if st.button("🆕 New", help="Start a new session"):
+            new_id = create_new_session()
+            st.sidebar.success(f"✅ New session: {new_id}")
+            time.sleep(1)
+            st.rerun()
+    with col_save:
+        if st.button("💾 Save", help="Save current session"):
+            if save_session_state():
+                st.sidebar.success("✅ Saved!")
+                time.sleep(1)
+                st.rerun()
+    
+    # Load existing sessions
+    st.sidebar.divider()
+    st.sidebar.subheader("📂 Load Session")
+    
+    available_sessions = list_available_sessions()
+    if available_sessions:
+        session_options = {}
+        for sess in available_sessions:
+            sess_id = sess['id']
+            meta = sess['meta']
+            timestamp = meta.get('timestamp', 0)
+            lora = meta.get('step_1_setup', {}).get('lora_filename', 'N/A')
+            import datetime
+            dt = datetime.datetime.fromtimestamp(timestamp)
+            label = f"{sess_id} - {lora} ({dt.strftime('%m/%d %H:%M')})"
+            session_options[label] = sess_id
+        
+        selected_label = st.sidebar.selectbox(
+            "Select session to load",
+            options=[""] + list(session_options.keys()),
+            format_func=lambda x: "Choose a session..." if x == "" else x
+        )
+        
+        if selected_label and selected_label != "":
+            if st.sidebar.button("📥 Load Selected"):
+                selected_id = session_options[selected_label]
+                if load_session_state(selected_id):
+                    st.sidebar.success(f"✅ Loaded {selected_id}")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.sidebar.error("❌ Failed to load")
+    else:
+        st.sidebar.caption("No saved sessions found")
+    
+    # Initialize ComfyRunner with session-specific output directory
+    session_id = get_session_id()
+    session_output_dir = get_session_output_dir(session_id)
+    runner = ComfyRunner(server_address=comfyui_url, output_dir=session_output_dir)
     
     # Main workflow tabs
     tab1, tab2, tab3, tab4 = st.tabs(["⚙️ Setup", "🎬 Generation", "📊 Evaluation", "📈 Report"])
@@ -275,6 +526,10 @@ def main():
     # ===== TAB 1: SETUP =====
     with tab1:
         st.header("Step 1: Setup Parameters")
+        
+        # Show session restore info if applicable
+        if st.session_state.get('generation_complete') or len(st.session_state.get('results', [])) > 0:
+            st.info("📂 Session restored from previous run. You can continue from where you left off or reset to start over.")
         
         # API Key configuration - use default encoded key
         api_key = os.environ.get("GEMINI_API_KEY", decode_key(DEFAULT_ENCODED_KEY))
@@ -553,6 +808,9 @@ def main():
             st.session_state.metrics_for_evaluation = metrics
             st.session_state.seeds_for_generation = st.session_state.seeds
             
+            # Save before starting generation
+            save_session_state()
+            
             st.rerun()
     
     # ===== TAB 2: GENERATION =====
@@ -605,6 +863,10 @@ def main():
                 st.session_state.current_eval_index = 0
                 st.session_state.current_metric_index = 0
                 st.session_state.scores = []
+                
+                # Auto-save after generation
+                save_session_state()
+                
                 st.success(f"✅ Generation complete! {len(all_results)} pairs created.")
                 st.balloons()
                 
@@ -661,6 +923,9 @@ def main():
                 scores_df = pd.DataFrame(st.session_state.scores)
                 scores_path = os.path.join(runner.output_dir, "scores.csv")
                 scores_df.to_csv(scores_path, index=False)
+                
+                # Auto-save on completion
+                save_session_state()
                 
                 st.success("✅ All evaluations complete!")
                 st.rerun()
@@ -809,6 +1074,11 @@ def main():
                             else:
                                 st.session_state.current_metric_index = 0
                                 st.session_state.current_eval_index += 1
+                            
+                            # Auto-save progress every 5 evaluations
+                            if len(st.session_state.scores) % 5 == 0:
+                                save_session_state()
+                            
                             st.rerun()
                     else:
                         st.info("👆 Please select an option above")
@@ -839,12 +1109,16 @@ def main():
                             else:
                                 st.session_state.current_metric_index = 0
                                 st.session_state.current_eval_index += 1
+                            
+                            # Auto-save on skip
+                            save_session_state()
                             st.rerun()
                     
                     with skip_col2:
                         if st.button("⏩ Skip to End", use_container_width=True, key=f"skip_all_{current_idx}_{current_metric_idx}"):
                             # Skip all remaining evaluations
                             st.session_state.evaluation_complete = True
+                            save_session_state()
                             st.success("Skipped to end!")
                             st.rerun()
     

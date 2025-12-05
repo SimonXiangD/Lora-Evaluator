@@ -19,19 +19,20 @@ from PIL import Image
 class ComfyRunner:
     """Manages interaction with ComfyUI API for LoRA evaluation."""
     
-    def __init__(self, server_address="127.0.0.1:8188", workflow_path="workfow_api.json"):
+    def __init__(self, server_address="127.0.0.1:8188", workflow_path="workfow_api.json", output_dir=None):
         """
         Initialize ComfyUI runner.
         
         Args:
             server_address: ComfyUI server address (default: 127.0.0.1:8188)
             workflow_path: Path to workflow JSON file
+            output_dir: Custom output directory (default: ./output)
         """
         self.server_address = server_address
         self.workflow_path = workflow_path
         self.workflow = None
         self.client_id = str(uuid.uuid4())
-        self.output_dir = "./output"
+        self.output_dir = output_dir if output_dir else "./output"
         
         # Ensure output directory exists
         os.makedirs(self.output_dir, exist_ok=True)
