@@ -230,6 +230,7 @@ class ComfyRunner:
         results = []
         
         # Initialize CSV log
+        os.makedirs(self.output_dir, exist_ok=True)
         log_path = os.path.join(self.output_dir, "generation_log.csv")
         csv_exists = os.path.exists(log_path)
         
